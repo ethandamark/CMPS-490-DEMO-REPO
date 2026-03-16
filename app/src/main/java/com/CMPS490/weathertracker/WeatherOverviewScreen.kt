@@ -41,6 +41,9 @@ fun WeatherOverviewScreen(
     alert: WeatherAlertUiModel?,
     forecast: List<DailyForecastUiModel>,
     userLocation: LatLng?,
+    locationOptions: List<LocationOptionUiModel>,
+    selectedLocationOption: LocationOptionUiModel,
+    onLocationSelected: (LocationOptionUiModel) -> Unit,
     onLiveRadarClick: () -> Unit
 ) {
     Box(
@@ -59,6 +62,14 @@ fun WeatherOverviewScreen(
             contentPadding = PaddingValues(top = 60.dp, bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
+            item {
+                LocationSelectorCard(
+                    locationOptions = locationOptions,
+                    selectedLocationOption = selectedLocationOption,
+                    onLocationSelected = onLocationSelected
+                )
+            }
+
             item {
                 WeatherHeaderSection(currentWeather)
             }
@@ -85,6 +96,55 @@ fun WeatherOverviewScreen(
 
             items(forecast) { day ->
                 ForecastRow(day)
+            }
+        }
+    }
+}
+
+@Composable
+fun LocationSelectorCard(
+    locationOptions: List<LocationOptionUiModel>,
+    selectedLocationOption: LocationOptionUiModel,
+    onLocationSelected: (LocationOptionUiModel) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Surface(
+        color = CardBackground,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Location Source",
+                style = MaterialTheme.typography.labelMedium,
+                color = MutedText,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.2.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Box {
+                OutlinedButton(
+                    onClick = { expanded = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = selectedLocationOption.label)
+                }
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier.fillMaxWidth(0.92f)
+                ) {
+                    locationOptions.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                onLocationSelected(option)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -393,6 +453,13 @@ fun PreviewWeatherOverview() {
             alert = mockAlert,
             forecast = mockForecast,
             userLocation = LatLng(30.2241, -92.0198),
+            locationOptions = listOf(
+                LocationOptionUiModel("Use device location", null, null, true),
+                LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
+                LocationOptionUiModel("Lafayette, LA", 30.2241, -92.0198)
+            ),
+            selectedLocationOption = LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
+            onLocationSelected = {},
             onLiveRadarClick = {}
         )
     }

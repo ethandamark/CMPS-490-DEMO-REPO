@@ -3,3 +3,12 @@ plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.kotlin.compose) apply false
 }
+
+val externalBuildRoot = providers.environmentVariable("LOCALAPPDATA")
+    .orNull
+    ?.let { file("$it/CMPS490-FrontendRepo/build") }
+    ?: file("${System.getProperty("java.io.tmpdir")}/CMPS490-FrontendRepo/build")
+
+subprojects {
+    layout.buildDirectory.set(externalBuildRoot.resolve(name))
+}

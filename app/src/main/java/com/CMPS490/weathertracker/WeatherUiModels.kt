@@ -35,6 +35,14 @@ data class DailyForecastUiModel(
     val isToday: Boolean = false
 )
 
+@Immutable
+data class LocationOptionUiModel(
+    val label: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val useDeviceLocation: Boolean = false
+)
+
 enum class WeatherType {
     Sunny, Cloudy, Rainy, Stormy, PartlyCloudy
 }
