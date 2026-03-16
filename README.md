@@ -2,6 +2,15 @@
 
 Android app project built with Gradle and Kotlin.
 
+## Demo Repository
+
+This repository is the team demo/integration version of the project.
+
+- Original backend repository: https://github.com/ethandamark/CMPS-490-BACKEND-REPO
+- Original frontend repository: <add-frontend-repo-url-here>
+
+Use this repo to review demo progress and integration changes without modifying the original source repos.
+
 ## Build
 
 From the project root:
