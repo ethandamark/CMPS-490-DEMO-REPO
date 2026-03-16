@@ -25,6 +25,8 @@ Open this exact folder as the project root:
 
 - `C:\Users\ethan\OneDrive\Desktop\CMPS490\WeatherMCPApp`
 
+If you are on macOS/Linux, open the equivalent repository root on your machine (the folder containing `settings.gradle.kts`).
+
 Important:
 
 - Open the root folder above (the one with `settings.gradle.kts`), not the `app` subfolder.
