@@ -19,6 +19,24 @@ From the project root:
 .\gradlew.bat :app:assembleDebug
 ```
 
+## Open in Android Studio (Demo Test)
+
+Open this exact folder as the project root:
+
+- `C:\Users\ethan\OneDrive\Desktop\CMPS490\WeatherMCPApp`
+
+Important:
+
+- Open the root folder above (the one with `settings.gradle.kts`), not the `app` subfolder.
+
+Run the demo:
+
+1. Open Android Studio and choose **Open**.
+2. Select `C:\Users\ethan\OneDrive\Desktop\CMPS490\WeatherMCPApp`.
+3. Wait for Gradle sync to finish.
+4. Choose an emulator/device.
+5. Click **Run** on the `app` configuration.
+
 ## Troubleshooting
 
 ### Windows + OneDrive `AccessDeniedException` during build
