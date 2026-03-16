@@ -3,6 +3,7 @@ package com.example.weathermcpapp.network
 import retrofit2.Call
 import retrofit2.http.GET
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 interface WeatherApi {
 
@@ -16,5 +17,10 @@ interface WeatherApi {
     fun getForecastFromUrl(
         @retrofit2.http.Url url: String
     ): Call<ForecastResponse>
+
+    @GET("alerts/active")
+    fun getActiveAlertsByPoint(
+        @Query("point") point: String
+    ): Call<AlertsResponse>
 }
 
