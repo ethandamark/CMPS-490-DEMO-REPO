@@ -21,11 +21,11 @@ From the project root:
 
 ## Open in Android Studio (Demo Test)
 
-Open this exact folder as the project root:
+Open your local cloned repository root as the project root:
 
-- `C:\Users\ethan\OneDrive\Desktop\CMPS490\WeatherMCPApp`
+- Example folder name after cloning: `WeatherMCPApp`
 
-If you are on macOS/Linux, open the equivalent repository root on your machine (the folder containing `settings.gradle.kts`).
+Use the folder that contains `settings.gradle.kts`.
 
 Important:
 
@@ -34,7 +34,7 @@ Important:
 Run the demo:
 
 1. Open Android Studio and choose **Open**.
-2. Select `C:\Users\ethan\OneDrive\Desktop\CMPS490\WeatherMCPApp`.
+2. Select your local clone root (the folder containing `settings.gradle.kts`).
 3. Wait for Gradle sync to finish.
 4. Choose an emulator/device.
 5. Click **Run** on the `app` configuration.
