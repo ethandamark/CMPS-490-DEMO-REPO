@@ -20,13 +20,20 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MapStyleOptions
+import com.google.android.gms.maps.model.TileOverlay
+import com.google.android.gms.maps.model.TileOverlayOptions
+import com.google.android.gms.maps.model.UrlTileProvider
 import com.google.maps.android.compose.*
+import java.net.URL
+import java.util.concurrent.atomic.AtomicReference
 
 // Custom Colors based on Mockup
 val NavyDark = Color(0xFF0A1931)
@@ -97,8 +104,25 @@ fun WeatherOverviewScreen(
             items(forecast) { day ->
                 ForecastRow(day)
             }
+
+            item {
+                RadarAttributionFooter()
+            }
         }
     }
+}
+
+@Composable
+fun RadarAttributionFooter() {
+    Text(
+        text = "Radar data source: Rain Viewer API",
+        style = MaterialTheme.typography.labelSmall,
+        color = MutedText,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 12.dp)
+    )
 }
 
 @Composable
@@ -257,8 +281,41 @@ fun WeatherAlertCard(alert: WeatherAlertUiModel) {
 
 @Composable
 fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(userLocation ?: LatLng(30.2241, -92.0198), 10f)
+    }
+    val mapStyleOptions = remember {
+        runCatching {
+            MapStyleOptions.loadRawResourceStyle(context, R.raw.clean_radar_map_style)
+        }.getOrNull()
+    }
+    var radarTileTemplate by remember { mutableStateOf<String?>(null) }
+    val radarOverlayRef = remember { mutableStateOf<TileOverlay?>(null) }
+    val radarTileTemplateRef = remember { AtomicReference<String?>(null) }
+
+    LaunchedEffect(radarTileTemplate) {
+        radarTileTemplateRef.set(radarTileTemplate)
+        radarOverlayRef.value?.clearTileCache()
+    }
+
+    LaunchedEffect(Unit) {
+        fetchRainViewerFramesCached(
+            forceRefresh = false,
+            onSuccess = { frames ->
+                radarTileTemplate = frames.lastOrNull()?.tileTemplate
+            },
+            onFailure = {
+                radarTileTemplate = null
+            }
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            radarOverlayRef.value?.remove()
+            radarOverlayRef.value = null
+        }
     }
 
     // Update camera if user location changes
@@ -284,7 +341,8 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
                     cameraPositionState = cameraPositionState,
                     properties = MapProperties(
                         mapType = MapType.NORMAL,
-                        isMyLocationEnabled = false
+                        isMyLocationEnabled = false,
+                        mapStyleOptions = mapStyleOptions
                     ),
                     uiSettings = MapUiSettings(
                         zoomControlsEnabled = false,
@@ -295,6 +353,38 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
                         myLocationButtonEnabled = false
                     )
                 ) {
+                    MapEffect(Unit) { googleMap ->
+                        if (radarOverlayRef.value != null) {
+                            return@MapEffect
+                        }
+
+                        val provider = object : UrlTileProvider(256, 256) {
+                            override fun getTileUrl(x: Int, y: Int, zoom: Int): URL? {
+                                if (zoom !in RAIN_VIEWER_MIN_ZOOM..RAIN_VIEWER_MAX_ZOOM) {
+                                    return null
+                                }
+
+                                val tileTemplate = radarTileTemplateRef.get()
+                                if (tileTemplate.isNullOrBlank()) {
+                                    return null
+                                }
+
+                                val urlText = tileTemplate
+                                    .replace("{x}", x.toString())
+                                    .replace("{y}", y.toString())
+                                    .replace("{z}", zoom.toString())
+                                return runCatching { URL(urlText) }.getOrNull()
+                            }
+                        }
+
+                        radarOverlayRef.value = googleMap.addTileOverlay(
+                            TileOverlayOptions()
+                                .tileProvider(provider)
+                                .transparency(0.35f)
+                                .zIndex(1f)
+                        )
+                    }
+
                     Circle(
                         center = userLocation,
                         radius = 1500.0,

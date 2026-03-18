@@ -8,18 +8,37 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -36,8 +55,13 @@ import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.MapStyleOptions
+import com.google.android.gms.maps.model.TileOverlay
+import com.google.android.gms.maps.model.TileOverlayOptions
+import com.google.android.gms.maps.model.UrlTileProvider
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapEffect
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapType
 import com.google.maps.android.compose.MapUiSettings
@@ -45,11 +69,21 @@ import com.google.maps.android.compose.rememberCameraPositionState
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
+import java.net.URL
+import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.delay
 import kotlin.math.abs
+
+private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
+private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
+private const val RADAR_PLAYBACK_TICK_MS = 1500L
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalPermissionsApi::class)
@@ -440,6 +474,99 @@ fun MapScreen(
     }
 
     var selectedPin by remember { mutableStateOf<LatLng?>(initialLocation) }
+    var radarFrames by remember { mutableStateOf<List<RainViewerRadarFrame>>(emptyList()) }
+    var selectedFrameIndex by remember { mutableStateOf(0) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var isRadarEnabled by remember { mutableStateOf(false) }
+    val mapStyleOptions = remember {
+        runCatching {
+            MapStyleOptions.loadRawResourceStyle(context, R.raw.clean_radar_map_style)
+        }.getOrNull()
+    }
+    val radarOverlayRef = remember { mutableStateOf<TileOverlay?>(null) }
+    val radarTileTemplateRef = remember { AtomicReference<String?>(null) }
+    val radarEnabledRef = remember { AtomicBoolean(false) }
+    val radarTileTemplate = radarFrames.getOrNull(selectedFrameIndex)?.tileTemplate
+    val selectedFrameTime = radarFrames.getOrNull(selectedFrameIndex)?.epochSeconds
+
+    LaunchedEffect(radarTileTemplate) {
+        radarTileTemplateRef.set(radarTileTemplate)
+        radarOverlayRef.value?.clearTileCache()
+    }
+
+    LaunchedEffect(isRadarEnabled) {
+        radarEnabledRef.set(isRadarEnabled)
+        if (!isRadarEnabled) {
+            isPlaying = false
+        }
+        if (isRadarEnabled && cameraPositionState.position.zoom > RAIN_VIEWER_MAX_ZOOM.toFloat()) {
+            cameraPositionState.position = CameraPosition.fromLatLngZoom(
+                cameraPositionState.position.target,
+                RAIN_VIEWER_MAX_ZOOM.toFloat()
+            )
+        }
+        radarOverlayRef.value?.clearTileCache()
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            fetchRainViewerFramesCached(
+                forceRefresh = true,
+                onSuccess = { frames ->
+                    val selectedEpoch = radarFrames.getOrNull(selectedFrameIndex)?.epochSeconds
+                    radarFrames = frames
+
+                    if (frames.isEmpty()) {
+                        selectedFrameIndex = 0
+                        isPlaying = false
+                    } else {
+                        selectedFrameIndex = findPreferredFrameIndex(
+                            frames = frames,
+                            preferredEpochSeconds = selectedEpoch,
+                            fallbackIndex = frames.lastIndex
+                        )
+                    }
+                },
+                onFailure = {
+                    if (radarFrames.isEmpty()) {
+                        selectedFrameIndex = 0
+                        isPlaying = false
+                    }
+                }
+            )
+
+            delay(RADAR_REFRESH_INTERVAL_MS)
+        }
+    }
+
+    LaunchedEffect(isPlaying, radarFrames.size) {
+        if (!isPlaying || radarFrames.size < 2) {
+            return@LaunchedEffect
+        }
+
+        while (isPlaying) {
+            delay(RADAR_PLAYBACK_TICK_MS)
+            val frameCount = radarFrames.size
+            if (frameCount < 2) {
+                isPlaying = false
+                return@LaunchedEffect
+            }
+            selectedFrameIndex = findSteppedFrameIndex(
+                frames = radarFrames,
+                currentIndex = selectedFrameIndex,
+                stepSeconds = RADAR_PLAYBACK_STEP_SECONDS,
+                forward = true,
+                wrap = true
+            )
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            radarOverlayRef.value?.remove()
+            radarOverlayRef.value = null
+        }
+    }
 
     @SuppressLint("MissingPermission")
     LaunchedEffect(locationPermissionState.allPermissionsGranted) {
@@ -466,12 +593,50 @@ fun MapScreen(
             },
             properties = MapProperties(
                 isMyLocationEnabled = locationPermissionState.allPermissionsGranted,
-                mapType = MapType.NORMAL
+                mapType = MapType.NORMAL,
+                mapStyleOptions = mapStyleOptions,
+                maxZoomPreference = if (isRadarEnabled) RAIN_VIEWER_MAX_ZOOM.toFloat() else 21f
             ),
             uiSettings = MapUiSettings(
                 myLocationButtonEnabled = true
             )
         ) {
+            MapEffect(Unit) { googleMap ->
+                if (radarOverlayRef.value != null) {
+                    return@MapEffect
+                }
+
+                val provider = object : UrlTileProvider(256, 256) {
+                    override fun getTileUrl(x: Int, y: Int, zoom: Int): URL? {
+                        if (zoom !in RAIN_VIEWER_MIN_ZOOM..RAIN_VIEWER_MAX_ZOOM) {
+                            return null
+                        }
+
+                        if (!radarEnabledRef.get()) {
+                            return null
+                        }
+
+                        val tileTemplate = radarTileTemplateRef.get()
+                        if (tileTemplate.isNullOrBlank()) {
+                            return null
+                        }
+
+                        val urlText = tileTemplate
+                            .replace("{x}", x.toString())
+                            .replace("{y}", y.toString())
+                            .replace("{z}", zoom.toString())
+                        return runCatching { URL(urlText) }.getOrNull()
+                    }
+                }
+
+                radarOverlayRef.value = googleMap.addTileOverlay(
+                    TileOverlayOptions()
+                        .tileProvider(provider)
+                        .transparency(0.35f)
+                        .zIndex(1f)
+                )
+            }
+
             selectedPin?.let { pin ->
                 Circle(
                     center = pin,
@@ -480,6 +645,107 @@ fun MapScreen(
                     strokeWidth = 4f,
                     fillColor = Color.Cyan.copy(alpha = 0.25f)
                 )
+            }
+        }
+
+        if (isRadarEnabled) {
+            RadarLegend(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 18.dp)
+            )
+        }
+
+        Surface(
+            color = Color.Black.copy(alpha = 0.6f),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 10.dp)
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Icon(
+                    imageVector = Icons.Filled.Layers,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.padding(start = 8.dp, top = 4.dp, end = 8.dp, bottom = 8.dp)
+                )
+                LayerToggleButton(
+                    text = "Map",
+                    icon = Icons.Filled.Map,
+                    selected = !isRadarEnabled,
+                    onClick = { isRadarEnabled = false }
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                LayerToggleButton(
+                    text = "Radar",
+                    icon = Icons.Filled.Radar,
+                    selected = isRadarEnabled,
+                    onClick = { isRadarEnabled = true }
+                )
+            }
+        }
+
+        if (isRadarEnabled) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.6f),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 20.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = selectedFrameTime?.let { formatRadarFrameTime(it) } ?: "Radar frame unavailable",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = {
+                                isPlaying = false
+                                selectedFrameIndex = findSteppedFrameIndex(
+                                    frames = radarFrames,
+                                    currentIndex = selectedFrameIndex,
+                                    stepSeconds = RADAR_PLAYBACK_STEP_SECONDS,
+                                    forward = false,
+                                    wrap = false
+                                )
+                            },
+                            enabled = radarFrames.isNotEmpty()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.FastRewind,
+                                contentDescription = "Rewind",
+                                tint = Color.White
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { isPlaying = !isPlaying },
+                            enabled = radarFrames.size > 1
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = Color.White
+                            )
+                        }
+
+                        Slider(
+                            value = selectedFrameIndex.toFloat(),
+                            onValueChange = { newValue ->
+                                isPlaying = false
+                                selectedFrameIndex = newValue.toInt().coerceIn(0, (radarFrames.size - 1).coerceAtLeast(0))
+                            },
+                            valueRange = 0f..(radarFrames.size - 1).coerceAtLeast(0).toFloat(),
+                            steps = (radarFrames.size - 2).coerceAtLeast(0),
+                            modifier = Modifier.weight(1f),
+                            enabled = radarFrames.size > 1
+                        )
+                    }
+                }
             }
         }
 
@@ -498,3 +764,154 @@ fun MapScreen(
         }
     }
 }
+
+@Composable
+private fun LayerToggleButton(
+    text: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (selected) Color(0xFF3A78FF) else Color.Black.copy(alpha = 0.35f),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .width(110.dp)
+            .padding(horizontal = 2.dp)
+            .clickable { onClick() }
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = text,
+                tint = Color.White
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = text,
+                color = Color.White,
+                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun RadarLegend(modifier: Modifier = Modifier) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.62f),
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                text = "Radar Intensity",
+                color = Color.White,
+                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LegendSwatch(Color(0xFF58A6FF), "Light")
+                Spacer(modifier = Modifier.width(8.dp))
+                LegendSwatch(Color(0xFF29C76F), "Moderate")
+                Spacer(modifier = Modifier.width(8.dp))
+                LegendSwatch(Color(0xFFFFC233), "Heavy")
+                Spacer(modifier = Modifier.width(8.dp))
+                LegendSwatch(Color(0xFFFF5A5F), "Severe")
+            }
+        }
+    }
+}
+
+@Composable
+private fun LegendSwatch(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .width(14.dp)
+                .height(8.dp)
+                .background(color, RoundedCornerShape(2.dp))
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            color = Color.White,
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+private fun formatRadarFrameTime(epochSeconds: Long): String {
+    return runCatching {
+        val instant = Instant.ofEpochSecond(epochSeconds)
+        val localDateTime = instant.atZone(ZoneId.systemDefault()).toLocalDateTime()
+        localDateTime.format(DateTimeFormatter.ofPattern("EEE h:mm a", Locale.US))
+    }.getOrDefault("Frame time unavailable")
+}
+
+private fun findPreferredFrameIndex(
+    frames: List<RainViewerRadarFrame>,
+    preferredEpochSeconds: Long?,
+    fallbackIndex: Int
+): Int {
+    if (frames.isEmpty()) {
+        return 0
+    }
+
+    if (preferredEpochSeconds == null) {
+        return fallbackIndex.coerceIn(0, frames.lastIndex)
+    }
+
+    val exactMatchIndex = frames.indexOfFirst { it.epochSeconds == preferredEpochSeconds }
+    if (exactMatchIndex >= 0) {
+        return exactMatchIndex
+    }
+
+    val nearest = frames
+        .mapIndexed { index, frame -> index to abs(frame.epochSeconds - preferredEpochSeconds) }
+        .minByOrNull { it.second }
+        ?.first
+
+    return (nearest ?: fallbackIndex).coerceIn(0, frames.lastIndex)
+}
+
+private fun findSteppedFrameIndex(
+    frames: List<RainViewerRadarFrame>,
+    currentIndex: Int,
+    stepSeconds: Long,
+    forward: Boolean,
+    wrap: Boolean
+): Int {
+    if (frames.isEmpty()) {
+        return 0
+    }
+
+    val safeIndex = currentIndex.coerceIn(0, frames.lastIndex)
+    val currentEpochSeconds = frames[safeIndex].epochSeconds
+
+    return if (forward) {
+        val targetEpoch = currentEpochSeconds + stepSeconds
+        val nextIndex = frames.indexOfFirst { it.epochSeconds >= targetEpoch }
+        when {
+            nextIndex >= 0 -> nextIndex
+            wrap -> 0
+            else -> frames.lastIndex
+        }
+    } else {
+        val targetEpoch = currentEpochSeconds - stepSeconds
+        val previousIndex = frames.indexOfLast { it.epochSeconds <= targetEpoch }
+        when {
+            previousIndex >= 0 -> previousIndex
+            wrap -> frames.lastIndex
+            else -> 0
+        }
+    }
+}
+
