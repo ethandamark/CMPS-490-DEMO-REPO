@@ -186,34 +186,69 @@ fun WeatherHeaderSection(weather: CurrentWeatherUiModel) {
 
 @Composable
 fun WeatherAlertCard(alert: WeatherAlertUiModel) {
+    var expanded by remember { mutableStateOf(false) }
+    val isWarning = alert.title.contains("warning", ignoreCase = true)
+    val isWatch = alert.title.contains("watch", ignoreCase = true)
+    val isAdvisory = alert.title.contains("advisory", ignoreCase = true)
+
+    val accentColor = when {
+        isWarning -> Color(0xFFFF7A7A)
+        isWatch -> Color(0xFFFFB74D)
+        isAdvisory -> Color(0xFFFFE082)
+        else -> AlertGold
+    }
+    val cardColor = when {
+        isWarning -> Color(0xFF5A1E26).copy(alpha = 0.72f)
+        isWatch -> Color(0xFF5A3A1A).copy(alpha = 0.72f)
+        isAdvisory -> Color(0xFF5B4B1A).copy(alpha = 0.72f)
+        else -> CardBackground
+    }
+    val detailTextColor = Color(0xFFF8FAFF)
+    val subtitleColor = Color(0xFFE3E8F5)
+
     Surface(
-        color = CardBackground,
+        color = cardColor,
         shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, AlertGold.copy(alpha = 0.5f)),
-        modifier = Modifier.fillMaxWidth()
+        border = androidx.compose.foundation.BorderStroke(1.dp, accentColor.copy(alpha = 0.65f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.Warning,
-                contentDescription = null,
-                tint = AlertGold,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column {
-                Text(
-                    text = alert.title,
-                    color = AlertGold,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(24.dp)
                 )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = alert.title,
+                        color = accentColor,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (expanded) "Tap to hide details" else "Tap to view details",
+                        color = subtitleColor,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    tint = accentColor
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
                 Text(
                     text = alert.description,
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall
+                    color = detailTextColor,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 12.dp)
                 )
             }
         }
@@ -241,33 +276,43 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
             .height(180.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            GoogleMap(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(16.dp)),
-                cameraPositionState = cameraPositionState,
-                properties = MapProperties(
-                    mapType = MapType.SATELLITE,
-                    isMyLocationEnabled = false
-                ),
-                uiSettings = MapUiSettings(
-                    zoomControlsEnabled = false,
-                    scrollGesturesEnabled = false,
-                    zoomGesturesEnabled = false,
-                    tiltGesturesEnabled = false,
-                    rotationGesturesEnabled = false,
-                    myLocationButtonEnabled = false
-                )
-            ) {
-                userLocation?.let {
+            if (userLocation != null) {
+                GoogleMap(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp)),
+                    cameraPositionState = cameraPositionState,
+                    properties = MapProperties(
+                        mapType = MapType.NORMAL,
+                        isMyLocationEnabled = false
+                    ),
+                    uiSettings = MapUiSettings(
+                        zoomControlsEnabled = false,
+                        scrollGesturesEnabled = false,
+                        zoomGesturesEnabled = false,
+                        tiltGesturesEnabled = false,
+                        rotationGesturesEnabled = false,
+                        myLocationButtonEnabled = false
+                    )
+                ) {
                     Circle(
-                        center = it,
+                        center = userLocation,
                         radius = 1500.0,
                         strokeColor = Color.Red,
                         strokeWidth = 2f,
                         fillColor = Color.Red.copy(alpha = 0.2f)
                     )
                 }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(NavyDark, CardBackground)
+                            )
+                        )
+                )
             }
 
             // Overlay to make it look like a button and capture clicks

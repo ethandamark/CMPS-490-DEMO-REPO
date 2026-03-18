@@ -6,6 +6,7 @@ data class PointResponse(
 
 data class PointProperties(
     val forecast: String,
+    val forecastHourly: String?,
     val relativeLocation: RelativeLocation?
 )
 

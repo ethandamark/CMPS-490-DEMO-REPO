@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="google_maps_key">
-        AIzaSyDzhlvsYMJl79O7iHq_aENRzXvchSh1cJU
-    </string>
+    <string name="google_maps_key" translatable="false">AIzaSyDzhlvsYMJl79O7iHq_aENRzXvchSh1cJU</string>
 </resources>
-

@@ -3,6 +3,7 @@ package com.CMPS490.weathertracker
 import android.Manifest
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -48,6 +49,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalPermissionsApi::class)
@@ -95,7 +97,7 @@ class MainActivity : ComponentActivity() {
                         LocationOptionUiModel("Monroe, LA", 32.5093, -92.1193)
                     )
                 }
-                var selectedLocationOption by remember { mutableStateOf(locationOptions[3]) }
+                var selectedLocationOption by remember { mutableStateOf(locationOptions[0]) }
 
                 val weatherQueryLocation = when {
                     selectedLocationOption.useDeviceLocation &&
@@ -148,6 +150,17 @@ class MainActivity : ComponentActivity() {
                     val requestKey = "$lat,$lon"
                     activeRequestKey = requestKey
 
+                    val cachedSnapshot = WeatherApiCache.get(lat, lon)
+                    if (cachedSnapshot != null) {
+                        currentWeather = cachedSnapshot.currentWeather
+                        alertWeather = cachedSnapshot.alertWeather
+                        forecastWeather = cachedSnapshot.forecastWeather
+                        Log.d("WeatherCache", "USING_CACHED_DATA for requestKey=$requestKey")
+                        return@LaunchedEffect
+                    }
+
+                    var requestAlert: WeatherAlertUiModel? = null
+
                     RetrofitInstance.api.getActiveAlertsByPoint("$lat,$lon")
                         .enqueue(object : Callback<AlertsResponse> {
                             override fun onResponse(
@@ -157,13 +170,15 @@ class MainActivity : ComponentActivity() {
                                 if (activeRequestKey != requestKey) {
                                     return
                                 }
-                                alertWeather = mapAlertToUi(response.body()?.features)
+                                requestAlert = mapAlertToUi(response.body()?.features)
+                                alertWeather = requestAlert
                             }
 
                             override fun onFailure(call: Call<AlertsResponse>, t: Throwable) {
                                 if (activeRequestKey != requestKey) {
                                     return
                                 }
+                                requestAlert = null
                                 alertWeather = null
                             }
                         })
@@ -179,6 +194,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 val point = response.body()
                                 val forecastUrl = point?.properties?.forecast
+                                val forecastHourlyUrl = point?.properties?.forecastHourly
                                 if (forecastUrl == null) {
                                     currentWeather = currentWeather.copy(condition = "No forecast available")
                                     forecastWeather = emptyList()
@@ -204,6 +220,56 @@ class MainActivity : ComponentActivity() {
                                             val locationLabel = buildLocationLabel(point)
                                             currentWeather = mapCurrentWeather(locationLabel, periods)
                                             forecastWeather = mapForecast(periods)
+
+                                            WeatherApiCache.put(
+                                                lat = lat,
+                                                lon = lon,
+                                                currentWeather = currentWeather,
+                                                alertWeather = requestAlert,
+                                                forecastWeather = forecastWeather
+                                            )
+
+                                            if (
+                                                !selectedLocationOption.useDeviceLocation &&
+                                                coordinatesMatch(selectedLocationOption.latitude, lat) &&
+                                                coordinatesMatch(selectedLocationOption.longitude, lon)
+                                            ) {
+                                                selectedLocationOption = selectedLocationOption.copy(label = "$locationLabel (Pinned)")
+                                            }
+
+                                            if (!forecastHourlyUrl.isNullOrBlank()) {
+                                                RetrofitInstance.api.getForecastFromUrl(forecastHourlyUrl)
+                                                    .enqueue(object : Callback<ForecastResponse> {
+                                                        override fun onResponse(
+                                                            call: Call<ForecastResponse>,
+                                                            response: Response<ForecastResponse>
+                                                        ) {
+                                                            if (activeRequestKey != requestKey) {
+                                                                return
+                                                            }
+                                                            val hourlyNow = response.body()?.properties?.periods?.firstOrNull()
+                                                            if (hourlyNow != null) {
+                                                                currentWeather = currentWeather.copy(
+                                                                    temperature = hourlyNow.temperature,
+                                                                    condition = hourlyNow.shortForecast
+                                                                )
+                                                                WeatherApiCache.put(
+                                                                    lat = lat,
+                                                                    lon = lon,
+                                                                    currentWeather = currentWeather,
+                                                                    alertWeather = requestAlert,
+                                                                    forecastWeather = forecastWeather
+                                                                )
+                                                            }
+                                                        }
+
+                                                        override fun onFailure(call: Call<ForecastResponse>, t: Throwable) {
+                                                            if (activeRequestKey != requestKey) {
+                                                                return
+                                                            }
+                                                        }
+                                                    })
+                                            }
                                         }
 
                                         override fun onFailure(call: Call<ForecastResponse>, t: Throwable) {
@@ -240,7 +306,18 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("map_screen") {
-                        MapScreen(onBack = { navController.popBackStack() })
+                        MapScreen(
+                            onBack = { navController.popBackStack() },
+                            initialLocation = mapLocation,
+                            onPinSelected = { pinnedLatLng ->
+                                selectedLocationOption = LocationOptionUiModel(
+                                    label = "Pinned location",
+                                    latitude = pinnedLatLng.latitude,
+                                    longitude = pinnedLatLng.longitude,
+                                    useDeviceLocation = false
+                                )
+                            }
+                        )
                     }
                 }
             }
@@ -333,9 +410,17 @@ private fun formatDateLong(iso: String): String {
     }.getOrDefault("Today")
 }
 
+private fun coordinatesMatch(a: Double?, b: Double, tolerance: Double = 0.0001): Boolean {
+    return a != null && abs(a - b) < tolerance
+}
+
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun MapScreen(onBack: () -> Unit) {
+fun MapScreen(
+    onBack: () -> Unit,
+    initialLocation: LatLng?,
+    onPinSelected: (LatLng) -> Unit
+) {
 
     val context = LocalContext.current
     val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
@@ -350,9 +435,11 @@ fun MapScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         locationPermissionState.launchMultiplePermissionRequest()
     }
-    val cameraPositionState = rememberCameraPositionState()
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(initialLocation ?: LatLng(30.2241, -92.0198), 10f)
+    }
 
-    var hazardZone by remember { mutableStateOf<HazardZone?>(null) }
+    var selectedPin by remember { mutableStateOf<LatLng?>(initialLocation) }
 
     @SuppressLint("MissingPermission")
     LaunchedEffect(locationPermissionState.allPermissionsGranted) {
@@ -360,16 +447,9 @@ fun MapScreen(onBack: () -> Unit) {
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                 if (location != null) {
                     val userLatLng = LatLng(location.latitude, location.longitude)
-                    cameraPositionState.position = CameraPosition.fromLatLngZoom(
-                        userLatLng,
-                        12f // Zoom to a level where the circle is visible
-                    )
-                    // Create a flood hazard zone
-                    hazardZone = HazardZone(
-                        center = userLatLng,
-                        radiusMeters = 1500.0,
-                        severity = "WARNING"
-                    )
+                    if (initialLocation == null) {
+                        cameraPositionState.position = CameraPosition.fromLatLngZoom(userLatLng, 12f)
+                    }
                 }
             }
         }
@@ -379,25 +459,27 @@ fun MapScreen(onBack: () -> Unit) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
+            onMapClick = { tappedLatLng ->
+                selectedPin = tappedLatLng
+                onPinSelected(tappedLatLng)
+                onBack()
+            },
             properties = MapProperties(
                 isMyLocationEnabled = locationPermissionState.allPermissionsGranted,
-                mapType = MapType.SATELLITE
+                mapType = MapType.NORMAL
             ),
             uiSettings = MapUiSettings(
                 myLocationButtonEnabled = true
             )
         ) {
-            // Draw hazard zone on the map
-            hazardZone?.let { zone ->
-                if (zone.severity == "WARNING") {
-                    Circle(
-                        center = zone.center,
-                        radius = zone.radiusMeters,
-                        strokeColor = Color.Red,
-                        strokeWidth = 4f,
-                        fillColor = Color.Red.copy(alpha = 0.3f)
-                    )
-                }
+            selectedPin?.let { pin ->
+                Circle(
+                    center = pin,
+                    radius = 500.0,
+                    strokeColor = Color.Cyan,
+                    strokeWidth = 4f,
+                    fillColor = Color.Cyan.copy(alpha = 0.25f)
+                )
             }
         }
 
