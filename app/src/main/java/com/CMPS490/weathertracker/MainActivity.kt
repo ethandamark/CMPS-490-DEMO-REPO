@@ -80,6 +80,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
 private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
@@ -90,6 +92,30 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Initialize Supabase configuration
+        SupabaseConfig.initialize(this)
+
+        // Initialize authentication on first run
+        lifecycleScope.launch {
+            Log.d("MainActivity", "\n\n")
+            Log.d("MainActivity", "╔═══════════════════════════════════════════════════════════╗")
+            Log.d("MainActivity", "║         STARTING WEATHER TRACKER APPLICATION             ║")
+            Log.d("MainActivity", "╚═══════════════════════════════════════════════════════════╝")
+            Log.d("MainActivity", "")
+            val authService = AuthenticationService(this@MainActivity)
+            try {
+                val (userId, deviceId) = authService.initializeFirstRun()
+                Log.d("MainActivity", "")
+                Log.d("MainActivity", "✓ App ready to use! You are authenticated.")
+                Log.d("MainActivity", "")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "")
+                Log.e("MainActivity", "✗ Authentication failed - ${e.message}", e)
+                Log.e("MainActivity", "Make sure Supabase is running: 'supabase start'")
+                Log.e("MainActivity", "")
+            }
+        }
 
         setContent {
             WeatherTrackerTheme {

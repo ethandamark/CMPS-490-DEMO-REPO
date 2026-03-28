@@ -13,7 +13,7 @@ DROP POLICY IF EXISTS "Allow all authenticated users" ON offline_alert_snapshot;
 -- anonymous_user policies
 -- ==============================================
 CREATE POLICY "Allow select on all" ON anonymous_user FOR SELECT USING (true);
-CREATE POLICY "Allow insert for authenticated" ON anonymous_user FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Allow insert for anonymous" ON anonymous_user FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow update own record" ON anonymous_user FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "Allow delete own record" ON anonymous_user FOR DELETE USING (auth.uid() IS NOT NULL);
 
@@ -21,7 +21,7 @@ CREATE POLICY "Allow delete own record" ON anonymous_user FOR DELETE USING (auth
 -- device policies
 -- ==============================================
 CREATE POLICY "Allow select on all" ON device FOR SELECT USING (true);
-CREATE POLICY "Allow insert for authenticated" ON device FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "Allow insert for anonymous" ON device FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow update own" ON device FOR UPDATE USING (auth.uid() IS NOT NULL) WITH CHECK (auth.uid() IS NOT NULL);
 CREATE POLICY "Allow delete own" ON device FOR DELETE USING (auth.uid() IS NOT NULL);
 
