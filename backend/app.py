@@ -217,24 +217,51 @@ async def create_device(device_data: DeviceRequest):
         if not device_data.alertToken:
             device_data.alertToken = generate_alert_token()
         
+        print(f"\n[CREATE-DEVICE] Received request:")
+        print(f"  device_id: {device_data.deviceId}")
+        print(f"  anon_user_id: {device_data.anonUserId}")
+        print(f"  alert_token: {device_data.alertToken}")
+        print(f"  device_token: {device_data.deviceToken[:20]}..." if device_data.deviceToken else "  device_token: None")
+        print(f"  platform: {device_data.platform}")
+        print(f"  appVersion: {device_data.appVersion}")
+        print(f"  Supabase URL: {SUPABASE_BASE}")
+        
         async with httpx.AsyncClient() as client:
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
+                "Prefer": "return=representation"
             }
+            
+            post_url = f"{SUPABASE_BASE}/rest/v1/device"
+            post_body = device_data.dict()
+            
+            print(f"[POST] URL: {post_url}")
+            print(f"[POST] Body: {post_body}")
+            
             response = await client.post(
-                f"{SUPABASE_BASE}/rest/v1/device",
-                json=device_data.dict(),
+                post_url,
+                json=post_body,
                 headers=headers
             )
+            
+            print(f"[POST] Status: {response.status_code}")
+            print(f"[POST] Response: {response.text[:200]}")
+            
             if response.status_code in [200, 201]:
+                print(f"✓ Device created successfully with alert_token: {device_data.alertToken}")
                 return {
                     "success": True,
                     "deviceId": device_data.deviceId,
                     "alertToken": device_data.alertToken
                 }
-            return {"success": False, "error": response.text}
+            else:
+                print(f"✗ Error creating device: {response.text}")
+                return {"success": False, "error": response.text}
     except Exception as e:
+        print(f"✗ Exception in create_device: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Supabase Error: {str(e)}")
 
 
