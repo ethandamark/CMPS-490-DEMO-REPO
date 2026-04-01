@@ -2,7 +2,9 @@ package com.CMPS490.weathertracker
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.CMPS490.weathertracker.ui.theme.ThemeMode
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
 import com.CMPS490.weathertracker.network.AlertFeature
 import com.CMPS490.weathertracker.network.AlertsResponse
@@ -56,11 +59,30 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            WeatherTrackerTheme {
-                val navController = rememberNavController()
-                val context = LocalContext.current
-                val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
-                var userLocation by remember { mutableStateOf<LatLng?>(null) }
+            val navController = rememberNavController()
+            val context = LocalContext.current
+            val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+            val preferences = remember { context.getSharedPreferences("weather_tracker_prefs", Context.MODE_PRIVATE) }
+            var userLocation by remember { mutableStateOf<LatLng?>(null) }
+            var selectedThemeMode by remember {
+                mutableStateOf(
+                    runCatching {
+                        ThemeMode.valueOf(
+                            preferences.getString("theme_mode", ThemeMode.Dark.name) ?: ThemeMode.Dark.name
+                        )
+                    }.getOrDefault(ThemeMode.Dark)
+                )
+            }
+            var wantsNotifications by remember {
+                mutableStateOf(preferences.getBoolean("wants_notifications", false))
+            }
+            var notificationPhoneNumber by remember {
+                mutableStateOf(preferences.getString("notification_phone_number", "") ?: "")
+            }
+            var notificationSubmitInFlight by remember { mutableStateOf(false) }
+            var notificationSubmissionStatus by remember { mutableStateOf<String?>(null) }
+
+            WeatherTrackerTheme(themeMode = selectedThemeMode) {
 
                 val locationPermissionState = rememberMultiplePermissionsState(
                     permissions = listOf(
@@ -220,6 +242,7 @@ class MainActivity : ComponentActivity() {
                                 if (activeRequestKey != requestKey) {
                                     return
                                 }
+                                Log.e("WeatherTracker", "Point lookup failed", t)
                                 currentWeather = currentWeather.copy(condition = "Point lookup failed")
                                 forecastWeather = emptyList()
                             }
@@ -233,9 +256,57 @@ class MainActivity : ComponentActivity() {
                             alert = alertWeather,
                             forecast = forecastWeather,
                             userLocation = mapLocation,
+                            selectedThemeMode = selectedThemeMode,
+                            wantsNotifications = wantsNotifications,
+                            notificationPhoneNumber = notificationPhoneNumber,
+                            notificationSubmitInFlight = notificationSubmitInFlight,
+                            notificationSubmissionStatus = notificationSubmissionStatus,
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
                             onLocationSelected = { selectedLocationOption = it },
+                            onThemeModeSelected = { mode ->
+                                selectedThemeMode = mode
+                                preferences.edit()
+                                    .putString("theme_mode", mode.name)
+                                    .apply()
+                            },
+                            onNotificationPreferenceChange = { enabled ->
+                                wantsNotifications = enabled
+                                if (!enabled) {
+                                    notificationPhoneNumber = ""
+                                }
+                                preferences.edit()
+                                    .putBoolean("wants_notifications", enabled)
+                                    .putString(
+                                        "notification_phone_number",
+                                        if (enabled) notificationPhoneNumber else ""
+                                    )
+                                    .apply()
+                                if (!enabled) {
+                                    notificationSubmissionStatus = null
+                                }
+                            },
+                            onNotificationPhoneNumberChange = { phoneNumber ->
+                                notificationPhoneNumber = phoneNumber
+                                notificationSubmissionStatus = null
+                                preferences.edit()
+                                    .putString("notification_phone_number", phoneNumber)
+                                    .apply()
+                            },
+                            onNotificationSubmit = {
+                                if (notificationPhoneNumber.length != 10) {
+                                    notificationSubmissionStatus = "Enter a valid 10-digit number first."
+                                } else {
+                                    notificationSubmitInFlight = true
+                                    preferences.edit()
+                                        .putBoolean("wants_notifications", true)
+                                        .putString("notification_phone_number", notificationPhoneNumber)
+                                        .apply()
+                                    notificationSubmissionStatus =
+                                        "Phone number saved. Connect the backend endpoint in MainActivity to submit it."
+                                    notificationSubmitInFlight = false
+                                }
+                            },
                             onLiveRadarClick = { navController.navigate("map_screen") }
                         )
                     }
@@ -277,8 +348,7 @@ private fun mapCurrentWeather(
 
 private fun mapForecast(periods: List<ForecastPeriod>): List<DailyForecastUiModel> {
     return periods.take(7).mapIndexed { index, period ->
-        val precip = period.probabilityOfPrecipitation?.value?.toInt() ?: 0
-        val humidity = period.relativeHumidity?.value?.toInt() ?: 0
+        val precipitationChance = period.probabilityOfPrecipitation?.value?.toInt() ?: 0
         val feelsLike = period.temperature
         val lowTemp = (period.temperature - 8).coerceAtLeast(0)
 
@@ -288,13 +358,9 @@ private fun mapForecast(periods: List<ForecastPeriod>): List<DailyForecastUiMode
             weatherType = toWeatherType(period.shortForecast),
             highTemp = period.temperature,
             lowTemp = lowTemp,
-            precipitationChance = precip,
-            uvIndex = "--",
-            humidity = humidity,
+            precipitationChance = precipitationChance,
             windText = period.windSpeed,
             feelsLike = feelsLike,
-            sunrise = "--",
-            sunset = "--",
             isToday = index == 0
         )
     }
@@ -320,14 +386,14 @@ private fun toWeatherType(shortForecast: String): WeatherType {
 
 private fun formatDateShort(iso: String): String {
     return runCatching {
-        val dt = LocalDateTime.parse(iso.substring(0, 19))
+        val dt = LocalDateTime.parse(iso.take(19))
         dt.format(DateTimeFormatter.ofPattern("MMM d", Locale.US))
     }.getOrDefault(iso)
 }
 
 private fun formatDateLong(iso: String): String {
     return runCatching {
-        val dt = LocalDateTime.parse(iso.substring(0, 19))
+        val dt = LocalDateTime.parse(iso.take(19))
         val dayName = dt.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.US)
         "$dayName, ${dt.format(DateTimeFormatter.ofPattern("MMMM d", Locale.US))}"
     }.getOrDefault("Today")
