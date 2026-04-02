@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "weathertrackerseniorproject",
+  "private_key_id": "0041e98333aac9d17307a5be1b95afc17fab500b",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC7kDMMLSHdR652\nxRWzAYdQQqdxfws3k9HUeAklAbSMIp6kFEPY5xKnPGpXta3hF5ucoEG3m7jEJs55\nTXpjKG1rfbERVxEsHo7gALUrLYjAqVLoTed74oPbsRJZBTTjHXwEdPQjVk+caMN/\nLEMEOa7f0XvHBzBT9MLSUbHJj7SDPmdZDOnqkdkpu3cIPmXOM/y+ZsX3wd4+MNHr\nm1wwjCGRs/KdV3/IB1L/h7J2P2h93/WzYXA5qR8zYRj4rIDS8O15Lq6FKJxJcIPM\nqNBq4c+cZkPPCi6jMjDTgh/axys3XXqOFBn2cskaCHsLBrwZ8cF5qEktAOesUatZ\n8q0gva8FAgMBAAECggEABSQ4SgKotXykCyxu4lfN4kTZezJ817qtG1JpCcMotFi0\nmZHWpEj9SWlODvZzfEKd6Oa5tnNF1tarfUbC7pnqmfI5mtyUo215BCnwzWyznXhm\nxehwyoQUkj6h3p/Wac1im2qrUJaqmwKCLWfEtIZyRT9kUbngOMTyXDqSEZDnZVuS\nCtvJi43+o6KplWYwQHIqWKSjR5yU/RlXCWtfP9d5Cx0Oqxtn1jFKfTgRMRAecmOF\nAcSx76zyK2GdFP6oWc6Af0RLoGFQ7cGywFbsG4JTOx5u1IxYL5sM2xkL21xa/UF9\nDrt3UAdnB1yRceUMe2yxZqv3btGlpDvSjN38fChK9wKBgQDj3vRZjI5F5SIFdx00\nYvUAGq5u3I32iI80oogStoZ/XrzVhYY2fgIIzOtNP8I7Iy8tscx/ij1+ZPIVLmLo\nNYv3uQuyN+md94eo50/TdBR1UMJskBjIyIrvK6f03KSVV6l9il5cj4lllgdUbMMr\nU7BQoMKBVXM/YYVGX879o/vz3wKBgQDSt3dW9mlKyd1QNpqUuMcINZIE2T7KwaAr\niLbaJ3u17EVytjHoqR7p8CCBRERjybPJ446R3tF3St3QMKObQZMWIX5FhXhga5zU\nntth70JhtqI1lUXLmxCj40nSlcucabeBlCEtjLbvjglxgcPVG02BwLEKfbI2zvi+\nFVn/safZmwKBgBvkcJh9gfTARVfR6rs82ax3l55uVNo2gQD6XBmeSfxRRmAEhhcp\neWpGWw8LnOTMO7wmJVf/PeO4y4EYOnceBtH9zpa0DV6OrAZaugSyEscBaasMQFxj\nX85C074/O84j+tUpGL/Pugu7P45v+bvV9KEJ7IUURpUdhMjGdXnKls6VAoGANem7\nHwTs67W6akuOQX8FbZRHR/ZNmpLv6DOSlT6E6IcLPc5f9qdOwYwuxOQym1WAKqeO\nUsQv09XT6vCG67Jbb84iAKelpQXjmoMKnoQY9+dCmXMX6IBEQapluPuanOpviTfd\nRUo7hA9TWzdYY64Yppomsgh3EI7kFb5gyIsr5wECgYBNr+fAYqTKG/6l897slauq\nKToPJGUq11ZmZGewJFF8fOuO6MvpClh8I98mJsJrAJxjlPJPFviPLv0VdnvP9N+G\npeha6OjHU3wRw8aU0ACWzMZssH6EHFWlPREoZduUo5yChmljxhT9Hii8xCGa2xed\nOMouZvTHI/RPwnvCMR5BuA==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@weathertrackerseniorproject.iam.gserviceaccount.com",
+  "client_id": "104555454483232148717",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40weathertrackerseniorproject.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
