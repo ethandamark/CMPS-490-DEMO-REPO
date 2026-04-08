@@ -7,6 +7,7 @@ local.properties
 .externalNativeBuild/
 .cxx/
 *.iml
+backend/__pycache__/
 
 # Python virtual environment
 backend/venv/
