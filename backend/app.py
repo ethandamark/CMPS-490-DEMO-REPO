@@ -98,6 +98,32 @@ class WeatherAlertNotificationRequest(BaseModel):
     description: str
 
 
+# ============= ALERT EVENT MODELS =============
+
+from typing import Literal
+
+class CreateAlertEventRequest(BaseModel):
+    """Create alert from ML prediction - backend only"""
+    instance_id: str | None = None
+    latitude: float
+    longitude: float
+    alert_type: Literal["storm", "flood"]
+    severity_level: int
+    expires_at: str
+
+
+class AlertEventResponse(BaseModel):
+    """Alert event data"""
+    alert_id: str
+    instance_id: str | None
+    latitude: float
+    longitude: float
+    alert_type: str
+    severity_level: int
+    created_at: str
+    expires_at: str
+
+
 # ============= HEALTH CHECK =============
 
 @app.get("/health", response_model=HealthResponse)
@@ -441,6 +467,131 @@ async def send_weather_alert(request: WeatherAlertNotificationRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error sending weather alert: {str(e)}")
+
+
+# ============= ALERT EVENT API =============
+
+@app.post("/alerts/create")
+async def create_alert_event(request: CreateAlertEventRequest):
+    """
+    Create a new alert event. Called by backend ML pipeline.
+    Backend generates: alert_id, created_at
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+
+            alert_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+
+            alert_record = {
+                "alert_id": alert_id,
+                "instance_id": request.instance_id,
+                "latitude": request.latitude,
+                "longitude": request.longitude,
+                "alert_type": request.alert_type,
+                "severity_level": request.severity_level,
+                "created_at": now,
+                "expires_at": request.expires_at,
+            }
+
+            print(f"[ALERT] Creating alert: {alert_record}")
+
+            response = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/alert_event",
+                json=alert_record,
+                headers=headers,
+            )
+
+            if response.status_code in [200, 201]:
+                print(f"✓ Alert created: {alert_id}")
+                return {"success": True, "alert_id": alert_id, "created_at": now}
+            else:
+                print(f"✗ Failed to create alert: {response.text}")
+                raise HTTPException(status_code=500, detail=f"Failed: {response.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/alerts/active")
+async def get_active_alerts(lat: float | None = None, lon: float | None = None, radius_km: float = 50.0):
+    """Get all non-expired alerts, optionally filtered by location."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=gt.{now}&order=severity_level.desc",
+                headers=headers,
+            )
+
+            if response.status_code == 200:
+                alerts = response.json()
+                
+                if lat is not None and lon is not None:
+                    from math import radians, cos, sin, sqrt, atan2
+                    def haversine(lat1, lon1, lat2, lon2):
+                        R = 6371
+                        dlat, dlon = radians(lat2-lat1), radians(lon2-lon1)
+                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+                        return 2 * R * atan2(sqrt(a), sqrt(1-a))
+                    alerts = [a for a in alerts if haversine(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
+
+                return {"alerts": alerts, "count": len(alerts)}
+            else:
+                raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/alerts/{alert_id}")
+async def get_alert_by_id(alert_id: str):
+    """Get a specific alert by ID."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/alert_event?alert_id=eq.{alert_id}",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                alerts = response.json()
+                if alerts:
+                    return {"success": True, "alert": alerts[0]}
+                raise HTTPException(status_code=404, detail="Alert not found")
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/alerts/{alert_id}")
+async def delete_alert(alert_id: str):
+    """Delete an alert event."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Prefer": "return=representation"}
+            response = await client.delete(
+                f"{SUPABASE_BASE}/rest/v1/alert_event?alert_id=eq.{alert_id}",
+                headers=headers,
+            )
+            if response.status_code in [200, 204]:
+                return {"success": True, "message": f"Alert {alert_id} deleted"}
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============= ML PREDICTION ENDPOINT =============
