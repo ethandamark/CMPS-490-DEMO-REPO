@@ -40,11 +40,8 @@ interface BackendApi {
     fun getWeatherMaps(): Call<JsonObject>
     
     // ===== SUPABASE PROXIES =====
-    @POST("supabase/anon-user")
-    fun createAnonUser(@Body record: JsonObject): Call<JsonObject>
-    
-    @POST("supabase/device")
-    fun createDevice(@Body record: JsonObject): Call<JsonObject>
+    @POST("supabase/register")
+    fun register(@Body record: JsonObject): Call<JsonObject>
     
     // ===== ML PREDICTION =====
     @POST("predict")

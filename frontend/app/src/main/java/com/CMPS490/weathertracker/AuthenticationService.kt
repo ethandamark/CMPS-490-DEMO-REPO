@@ -1,8 +1,16 @@
 package com.CMPS490.weathertracker
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
-import java.util.UUID
+import androidx.core.content.ContextCompat
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class AuthenticationService(private val context: Context) {
     companion object {
@@ -27,63 +35,76 @@ class AuthenticationService(private val context: Context) {
             Log.d(TAG, "═══════════════════════════════════════════════════════════")
             existingUserId to existingDeviceId
         } else {
-            Log.d(TAG, "⚠ FIRST RUN DETECTED - Creating new anonymous account and device")
+            Log.d(TAG, "⚠ FIRST RUN DETECTED - Requesting backend to create account and device")
             Log.d(TAG, "═══════════════════════════════════════════════════════════")
             createAnonUserAndDevice()
         }
     }
 
     private suspend fun createAnonUserAndDevice(): Pair<String, String> {
-        val anonUserId = UUID.randomUUID().toString()
-        val deviceId = UUID.randomUUID().toString()
+        Log.d(TAG, "Requesting backend to register user + device...")
+        val latch = CountDownLatch(1)
+        var error: Exception? = null
+        var anonUserId: String? = null
+        var deviceId: String? = null
 
-        Log.d(TAG, "Generated UUIDs:")
-        Log.d(TAG, "  Anon User ID: $anonUserId")
-        Log.d(TAG, "  Device ID:    $deviceId")
+        val hasLocationPermission = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        Log.d(TAG, "  Location permission granted: $hasLocationPermission")
+
+        // Get FCM token before registering so device_token is filled at creation
+        var fcmToken: String? = null
+        try {
+            fcmToken = withContext(Dispatchers.IO) {
+                Tasks.await(FirebaseMessaging.getInstance().token, 10, TimeUnit.SECONDS)
+            }
+            Log.d(TAG, "  FCM token obtained: ${fcmToken?.take(20)}...")
+        } catch (e: Exception) {
+            Log.w(TAG, "  FCM token fetch failed, will be null at creation", e)
+        }
+        Log.d(TAG, "  Sending deviceToken to backend: ${if (fcmToken != null) "present (${fcmToken!!.length} chars)" else "NULL"}")
+
+        BackendRepository.register(
+            locationPermissionStatus = hasLocationPermission,
+            deviceToken = fcmToken,
+            onSuccess = { userId, devId ->
+                anonUserId = userId
+                deviceId = devId
+                latch.countDown()
+            },
+            onError = { e ->
+                error = e
+                latch.countDown()
+            }
+        )
+
+        if (!latch.await(30, TimeUnit.SECONDS)) {
+            throw Exception("Timeout waiting for registration")
+        }
+        if (error != null) {
+            Log.e(TAG, "✗ Registration failed", error)
+            throw error!!
+        }
+        Log.d(TAG, "✓ Registered by backend: user=$anonUserId, device=$deviceId")
         Log.d(TAG, "")
 
-        try {
-            // Create anonymous user in database
-            Log.d(TAG, "[1/2] Creating anonymous user record in Supabase...")
-            val userResult = SupabaseRepository.createAnonUser(anonUserId)
-            if (userResult.isFailure) {
-                Log.e(TAG, "✗ Failed to create anonymous user", userResult.exceptionOrNull())
-                throw userResult.exceptionOrNull() ?: Exception("Unknown error creating user")
-            }
-            Log.d(TAG, "")
-
-            // Create device linked to user
-            Log.d(TAG, "[2/2] Creating device record in Supabase...")
-            val deviceResult = SupabaseRepository.createDevice(deviceId, anonUserId)
-            if (deviceResult.isFailure) {
-                Log.e(TAG, "✗ Failed to create device", deviceResult.exceptionOrNull())
-                throw deviceResult.exceptionOrNull() ?: Exception("Unknown error creating device")
-            }
-            Log.d(TAG, "")
-
-            // Store locally for future use
-            Log.d(TAG, "Storing credentials locally in SharedPreferences...")
-            prefs.edit().apply {
-                putString(KEY_ANON_USER_ID, anonUserId)
-                putString(KEY_DEVICE_ID, deviceId)
-                apply()
-            }
-            Log.d(TAG, "✓ Credentials stored locally")
-            Log.d(TAG, "")
-
-            Log.d(TAG, "═══════════════════════════════════════════════════════════")
-            Log.d(TAG, "✓ AUTHENTICATION SETUP COMPLETE")
-            Log.d(TAG, "  Anon User ID: $anonUserId")
-            Log.d(TAG, "  Device ID:    $deviceId")
-            Log.d(TAG, "═══════════════════════════════════════════════════════════")
-            return anonUserId to deviceId
-        } catch (e: Exception) {
-            Log.e(TAG, "═══════════════════════════════════════════════════════════")
-            Log.e(TAG, "✗ AUTHENTICATION SETUP FAILED")
-            Log.e(TAG, "Error: ${e.message}", e)
-            Log.e(TAG, "═══════════════════════════════════════════════════════════")
-            throw e
+        // Store the backend-generated IDs locally for future use
+        Log.d(TAG, "Storing backend-generated credentials locally...")
+        prefs.edit().apply {
+            putString(KEY_ANON_USER_ID, anonUserId)
+            putString(KEY_DEVICE_ID, deviceId)
+            apply()
         }
+        Log.d(TAG, "✓ Credentials stored locally")
+        Log.d(TAG, "")
+
+        Log.d(TAG, "═══════════════════════════════════════════════════════════")
+        Log.d(TAG, "✓ AUTHENTICATION SETUP COMPLETE")
+        Log.d(TAG, "  Anon User ID: $anonUserId")
+        Log.d(TAG, "  Device ID:    $deviceId")
+        Log.d(TAG, "═══════════════════════════════════════════════════════════")
+        return anonUserId!! to deviceId!!
     }
 
     fun getStoredAnonUserId(): String? = prefs.getString(KEY_ANON_USER_ID, null)

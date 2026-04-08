@@ -133,80 +133,46 @@ object BackendRepository {
     // ===== SUPABASE OPERATIONS =====
     
     /**
-     * Create anonymous user via backend proxy
+     * Register anonymous user + device in one call.
+     * Backend generates ALL identifiers (userId, deviceId, alertToken).
+     * Frontend only sends locationPermissionStatus (a device-side fact).
+     * Returns (userId, deviceId) pair on success.
      */
-    fun createAnonUser(
-        anonUserId: String,
-        onSuccess: () -> Unit,
+    fun register(
+        locationPermissionStatus: Boolean = false,
+        deviceToken: String? = null,
+        onSuccess: (userId: String, deviceId: String) -> Unit,
         onError: (Exception) -> Unit
     ) {
         try {
-            Log.d(TAG, "→ Creating anonymous user: $anonUserId via backend")
+            Log.d(TAG, "→ Requesting backend to register user + device...")
             val record = JsonObject().apply {
-                addProperty("anonUserId", anonUserId)
-                addProperty("status", "active")
+                addProperty("locationPermissionStatus", locationPermissionStatus)
+                deviceToken?.let { addProperty("deviceToken", it) }
             }
             
-            val call = api.createAnonUser(record)
+            val call = api.register(record)
             call.enqueue(object : Callback<JsonObject> {
                 override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "✓ Anonymous user created successfully: $anonUserId")
-                        onSuccess()
+                    if (response.isSuccessful && response.body() != null) {
+                        val body = response.body()!!
+                        val userId = body.get("userId")?.asString ?: ""
+                        val deviceId = body.get("deviceId")?.asString ?: ""
+                        Log.d(TAG, "✓ Registered: user=$userId, device=$deviceId")
+                        onSuccess(userId, deviceId)
                     } else {
-                        Log.e(TAG, "✗ User creation error: ${response.code()}")
+                        Log.e(TAG, "✗ Registration error: ${response.code()}")
                         onError(Exception("HTTP ${response.code()}: ${response.message()}"))
                     }
                 }
                 
                 override fun onFailure(call: Call<JsonObject>, t: Throwable) {
-                    Log.e(TAG, "✗ User creation failure: ${t.message}", t)
+                    Log.e(TAG, "✗ Registration failure: ${t.message}", t)
                     onError(t as Exception)
                 }
             })
         } catch (e: Exception) {
-            Log.e(TAG, "✗ Error creating anonymous user: ${e.message}", e)
-            onError(e)
-        }
-    }
-    
-    /**
-     * Create device via backend proxy
-     */
-    fun createDevice(
-        deviceId: String,
-        anonUserId: String,
-        onSuccess: () -> Unit,
-        onError: (Exception) -> Unit
-    ) {
-        try {
-            Log.d(TAG, "→ Creating device: $deviceId linked to user: $anonUserId via backend")
-            val record = JsonObject().apply {
-                addProperty("deviceId", deviceId)
-                addProperty("anonUserId", anonUserId)
-                addProperty("platform", "android")
-                addProperty("appVersion", "1.0")
-            }
-            
-            val call = api.createDevice(record)
-            call.enqueue(object : Callback<JsonObject> {
-                override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "✓ Device created successfully: $deviceId")
-                        onSuccess()
-                    } else {
-                        Log.e(TAG, "✗ Device creation error: ${response.code()}")
-                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
-                    }
-                }
-                
-                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
-                    Log.e(TAG, "✗ Device creation failure: ${t.message}", t)
-                    onError(t as Exception)
-                }
-            })
-        } catch (e: Exception) {
-            Log.e(TAG, "✗ Error creating device: ${e.message}", e)
+            Log.e(TAG, "✗ Error registering: ${e.message}", e)
             onError(e)
         }
     }

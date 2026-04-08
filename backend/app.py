@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI backend for Weather Tracker ML predictions + API Proxy
 """
 from fastapi import FastAPI, HTTPException
@@ -12,7 +12,7 @@ from firebase_notifications import firebase_service
 import uuid
 import secrets
 import string
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Load environment variables
 load_dotenv()
@@ -68,22 +68,10 @@ class PredictionResponse(BaseModel):
     prediction: str = "ML model not yet integrated"
 
 
-class AnonUserRequest(BaseModel):
-    """Anonymous user creation request"""
-    anonUserId: str
-    status: str = "active"
-
-
-class DeviceRequest(BaseModel):
-    """Device creation request"""
-    deviceId: str
-    anonUserId: str
-    alertToken: str | None = None
+class RegisterRequest(BaseModel):
+    """Registration request â€” only device-side facts from frontend"""
+    locationPermissionStatus: bool = False
     deviceToken: str | None = None
-    platform: str = "android"
-    appVersion: str = "1.0"
-    locationPermissionStatus: bool | None = None
-
 
 class RegisterDeviceTokenRequest(BaseModel):
     """Register FCM device token"""
@@ -127,7 +115,7 @@ async def get_weather_points(lat: float, lon: float):
     Corresponds to: GET https://api.weather.gov/points/{lat},{lon}
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(f"{WEATHER_API_BASE}/points/{lat},{lon}")
             return response.json()
     except Exception as e:
@@ -141,7 +129,7 @@ async def get_forecast(url: str):
     Corresponds to: GET from forecast URL
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url)
             return response.json()
     except Exception as e:
@@ -155,7 +143,7 @@ async def get_alerts(point: str):
     Corresponds to: GET https://api.weather.gov/alerts/active?point={point}
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(f"{WEATHER_API_BASE}/alerts/active", params={"point": point})
             return response.json()
     except Exception as e:
@@ -171,7 +159,7 @@ async def get_weather_maps():
     Corresponds to: GET https://api.rainviewer.com/public/weather-maps.json
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(f"{RAINVIEWER_API_BASE}/public/weather-maps.json")
             return response.json()
     except Exception as e:
@@ -180,86 +168,117 @@ async def get_weather_maps():
 
 # ============= SUPABASE API PROXY =============
 
-@app.post("/supabase/anon-user")
-async def create_anon_user(user_data: AnonUserRequest):
+@app.post("/supabase/register")
+async def register_device(request: RegisterRequest):
     """
-    Proxy: Create anonymous user in Supabase
-    Corresponds to: POST /rest/v1/anonymous_user
+    Register a new anonymous user + device in one call.
+    Backend generates ALL identifiers: anon_user_id, device_id, alert_token.
+    Frontend only sends locationPermissionStatus (a device-side fact).
+    FCM device_token is set later via /notifications/register-device.
     """
     try:
-        async with httpx.AsyncClient() as client:
+        print(f"\n[REGISTER] Received request: locationPermissionStatus={request.locationPermissionStatus}, deviceToken={'present (' + str(len(request.deviceToken)) + ' chars)' if request.deviceToken else 'NULL'}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
+                "Prefer": "return=representation",
             }
-            response = await client.post(
+
+            # --- Check if device already exists by FCM token ---
+            if request.deviceToken:
+                existing_response = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/device?device_token=eq.{request.deviceToken}&select=device_id,anon_user_id,alert_token",
+                    headers=headers,
+                )
+                if existing_response.status_code == 200:
+                    existing = existing_response.json()
+                    if existing:
+                        device = existing[0]
+                        print(f"[REGISTER] Existing device found: {device['device_id']}, returning existing credentials")
+                        # Update last_seen_at
+                        now = datetime.now(timezone.utc).isoformat()
+                        await client.patch(
+                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device['device_id']}",
+                            json={"last_seen_at": now, "location_permission_status": request.locationPermissionStatus},
+                            headers=headers,
+                        )
+                        return {
+                            "success": True,
+                            "userId": device["anon_user_id"],
+                            "deviceId": device["device_id"],
+                            "alertToken": device["alert_token"],
+                        }
+
+            # --- No existing device found, create new ---
+            anon_user_id = str(uuid.uuid4())
+            device_id = str(uuid.uuid4())
+            alert_token = generate_alert_token()
+            now = datetime.now(timezone.utc).isoformat()
+
+            # --- Step 1: Create anonymous user ---
+            user_record = {
+                "anon_user_id": anon_user_id,
+                "status": "active",
+                "created_at": now,
+                "last_active_at": now,
+                "notification_opt_in": True,
+            }
+
+            print(f"[REGISTER] Creating NEW anonymous user: {user_record}")
+
+            user_response = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/anonymous_user",
-                json=user_data.dict(),
-                headers=headers
+                json=user_record,
+                headers=headers,
             )
-            if response.status_code in [200, 201]:
-                return {"success": True, "userId": user_data.anonUserId}
-            return {"success": False, "error": response.text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase Error: {str(e)}")
 
+            print(f"[REGISTER] User status: {user_response.status_code}")
+            print(f"[REGISTER] User response: {user_response.text[:200]}")
 
-@app.post("/supabase/device")
-async def create_device(device_data: DeviceRequest):
-    """
-    Proxy: Create device record in Supabase
-    Auto-generates an alert token if not provided (as UUID)
-    Stores optional device_token (FCM) separately
-    Corresponds to: POST /rest/v1/device
-    """
-    try:
-        # Auto-generate alert token if not provided
-        if not device_data.alertToken:
-            device_data.alertToken = generate_alert_token()
-        
-        print(f"\n[CREATE-DEVICE] Received request:")
-        print(f"  device_id: {device_data.deviceId}")
-        print(f"  anon_user_id: {device_data.anonUserId}")
-        print(f"  alert_token: {device_data.alertToken}")
-        print(f"  device_token: {device_data.deviceToken[:20]}..." if device_data.deviceToken else "  device_token: None")
-        print(f"  platform: {device_data.platform}")
-        print(f"  appVersion: {device_data.appVersion}")
-        print(f"  Supabase URL: {SUPABASE_BASE}")
-        
-        async with httpx.AsyncClient() as client:
-            headers = {
-                "apikey": SUPABASE_API_KEY,
-                "Content-Type": "application/json",
-                "Prefer": "return=representation"
+            if user_response.status_code not in [200, 201]:
+                print(f"âœ— Error creating user: {user_response.text}")
+                return {"success": False, "error": f"User creation failed: {user_response.text}"}
+
+            # --- Step 2: Create device linked to user ---
+            device_record = {
+                "device_id": device_id,
+                "anon_user_id": anon_user_id,
+                "alert_token": alert_token,
+                "platform": "android",
+                "app_version": "1.0",
+                "location_permission_status": request.locationPermissionStatus,
+                "last_seen_at": now,
+                "created_at": now,
             }
-            
-            post_url = f"{SUPABASE_BASE}/rest/v1/device"
-            post_body = device_data.dict()
-            
-            print(f"[POST] URL: {post_url}")
-            print(f"[POST] Body: {post_body}")
-            
-            response = await client.post(
-                post_url,
-                json=post_body,
-                headers=headers
+            if request.deviceToken:
+                device_record["device_token"] = request.deviceToken
+
+            print(f"[REGISTER] Creating device: {device_record}")
+
+            device_response = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/device",
+                json=device_record,
+                headers=headers,
             )
-            
-            print(f"[POST] Status: {response.status_code}")
-            print(f"[POST] Response: {response.text[:200]}")
-            
-            if response.status_code in [200, 201]:
-                print(f"✓ Device created successfully with alert_token: {device_data.alertToken}")
+
+            print(f"[REGISTER] Device status: {device_response.status_code}")
+            print(f"[REGISTER] Device response: {device_response.text[:200]}")
+
+            if device_response.status_code in [200, 201]:
+                print(f"âœ“ Registered: user={anon_user_id}, device={device_id}")
                 return {
                     "success": True,
-                    "deviceId": device_data.deviceId,
-                    "alertToken": device_data.alertToken
+                    "userId": anon_user_id,
+                    "deviceId": device_id,
+                    "alertToken": alert_token,
                 }
             else:
-                print(f"✗ Error creating device: {response.text}")
-                return {"success": False, "error": response.text}
+                print(f"âœ— Error creating device: {device_response.text}")
+                return {"success": False, "error": f"Device creation failed: {device_response.text}"}
     except Exception as e:
-        print(f"✗ Exception in create_device: {str(e)}")
+        print(f"âœ— Exception in register_device: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Supabase Error: {str(e)}")
@@ -285,7 +304,7 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
     print(f"  Supabase URL: {SUPABASE_BASE}")
     
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
@@ -293,7 +312,6 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
             }
             
             # First, try to update existing device by patching device_token and alert_token
-            # If alert_token was NULL and is now being set, update it
             patch_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}"
             patch_body = {
                 "device_token": request.device_token,
@@ -315,9 +333,8 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
             # Check if PATCH succeeded AND updated rows (response is not empty)
             patch_data = patch_response.json() if patch_response.text else []
             if patch_response.status_code in [200, 201, 204] and len(patch_data) > 0:
-                # Extract the existing alert_token from the database response
                 existing_alert_token = patch_data[0].get("alert_token") if patch_data else alert_token
-                print(f"✓ Device tokens updated successfully for: {request.device_id}")
+                print(f"âœ“ Device tokens updated successfully for: {request.device_id}")
                 return {
                     "success": True,
                     "message": "FCM token registered successfully",
@@ -345,7 +362,7 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
             print(f"[POST] Response: {post_response.text[:200]}")
             
             if post_response.status_code in [200, 201, 204]:
-                print(f"✓ New device created with tokens for: {request.device_id}")
+                print(f"âœ“ New device created with tokens for: {request.device_id}")
                 return {
                     "success": True,
                     "message": "Device created and token registered",
@@ -354,10 +371,10 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
                     "token_registered": True
                 }
             else:
-                print(f"✗ Error creating device: {post_response.text}")
+                print(f"âœ— Error creating device: {post_response.text}")
                 return {"success": False, "error": f"Failed to register device: {post_response.text}"}
     except Exception as e:
-        print(f"✗ Exception in register_device_token: {str(e)}")
+        print(f"âœ— Exception in register_device_token: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error registering device: {str(e)}")
@@ -367,7 +384,7 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
 async def send_notification(request: SendNotificationRequest):
     """
     Send a push notification to a device.
-    
+
     Example payload:
     {
         "device_token": "fcm_device_token_here",
@@ -385,7 +402,7 @@ async def send_notification(request: SendNotificationRequest):
             data=request.data,
             notification_type=request.notification_type
         )
-        
+
         return {
             "success": success,
             "message": "Notification sent" if success else "Failed to send notification",
@@ -399,7 +416,7 @@ async def send_notification(request: SendNotificationRequest):
 async def send_weather_alert(request: WeatherAlertNotificationRequest):
     """
     Send a weather alert notification to a device.
-    
+
     Example payload:
     {
         "device_token": "fcm_device_token_here",
@@ -415,7 +432,7 @@ async def send_weather_alert(request: WeatherAlertNotificationRequest):
             alert_type=request.alert_type,
             description=request.description
         )
-        
+
         return {
             "success": success,
             "message": "Weather alert sent" if success else "Failed to send alert",
@@ -446,4 +463,5 @@ async def predict(request: PredictionRequest):
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     reload = os.getenv('DEBUG', 'False') == 'True'
-    uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
+    uvicorn.run(app, host='127.0.0.1', port=port, reload=reload)
+from datetime import datetime

@@ -130,17 +130,27 @@ class WeatherTrackerMessagingService : FirebaseMessagingService() {
     }
     
     /**
-     * Send the FCM token to your backend
+     * Send the refreshed FCM token to the backend.
+     * Called when Firebase rotates the token after initial registration.
      */
     private fun sendTokenToBackend(token: String) {
-        // This should call your backend endpoint to register the device token
-        // Using BackendRepository.registerDeviceToken(token)
-        Log.d(TAG, "Device token: $token")
-        
-        // TODO: Implement backend token registration
-        // val repository = BackendRepository()
-        // repository.registerDeviceToken(token) { success ->
-        //     Log.d(TAG, "Token registration: $success")
-        // }
+        val prefs = getSharedPreferences("auth_prefs", Context.MODE_PRIVATE)
+        val deviceId = prefs.getString("device_id", null)
+        if (deviceId == null) {
+            Log.w(TAG, "No device_id stored yet — skipping token refresh registration")
+            return
+        }
+
+        Log.d(TAG, "Sending refreshed FCM token to backend for device: $deviceId")
+        BackendRepository.registerDeviceToken(
+            deviceToken = token,
+            deviceId = deviceId,
+            onSuccess = {
+                Log.d(TAG, "✓ Refreshed FCM token registered with backend")
+            },
+            onError = { error ->
+                Log.e(TAG, "✗ Failed to register refreshed token: ${error.message}")
+            }
+        )
     }
 }
