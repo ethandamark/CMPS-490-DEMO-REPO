@@ -3,6 +3,8 @@ package com.CMPS490.weathertracker
 import android.util.Log
 import com.google.gson.annotations.SerializedName
 import java.time.Instant
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 data class AnonymousUserRecord(
     @SerializedName("anon_user_id")
@@ -34,6 +36,13 @@ data class DeviceRecord(
     val lastSeenAt: String? = null,
     @SerializedName("created_at")
     val createdAt: String = Instant.now().toString()
+)
+
+data class DeviceUpdateRecord(
+    @SerializedName("location_permission_status")
+    val locationPermissionStatus: Boolean? = null,
+    @SerializedName("last_seen_at")
+    val lastSeenAt: String? = null
 )
 
 object SupabaseRepository {
@@ -68,15 +77,17 @@ object SupabaseRepository {
         }
     }
 
-    suspend fun createDevice(deviceId: String, anonUserId: String): Result<Unit> {
+    suspend fun createDevice(deviceId: String, anonUserId: String, locationPermissionStatus: Boolean? = null): Result<Unit> {
         return try {
             Log.d(TAG, "→ Attempting to create device with ID: $deviceId")
             Log.d(TAG, "  Linking to anonymous user: $anonUserId")
+            Log.d(TAG, "  Location permission status: $locationPermissionStatus")
             val api = SupabaseConfig.getApi()
             val record = DeviceRecord(
                 deviceId = deviceId,
                 anonUserId = anonUserId,
-                platform = "android"
+                platform = "android",
+                locationPermissionStatus = locationPermissionStatus
             )
 
             Log.d(TAG, "  Sending device insert request to Supabase...")
@@ -95,6 +106,42 @@ object SupabaseRepository {
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "✗ Failed to create device: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateDevice(
+        deviceId: String,
+        locationPermissionStatus: Boolean? = null,
+        lastSeenAt: String? = null
+    ): Result<Unit> {
+        return try {
+            Log.d(TAG, "→ Updating device: $deviceId")
+            if (locationPermissionStatus != null) {
+                Log.d(TAG, "  - Location permission status: $locationPermissionStatus")
+            }
+            if (lastSeenAt != null) {
+                Log.d(TAG, "  - Last seen at: $lastSeenAt")
+            }
+            
+            // Call BackendRepository.updateDevice() using suspendCancellableCoroutine
+            suspendCancellableCoroutine { continuation ->
+                BackendRepository.updateDevice(
+                    deviceId = deviceId,
+                    locationPermissionStatus = locationPermissionStatus,
+                    lastSeenAt = lastSeenAt,
+                    onSuccess = {
+                        Log.d(TAG, "✓ Device updated successfully: $deviceId")
+                        continuation.resume(Result.success(Unit))
+                    },
+                    onError = { error ->
+                        Log.e(TAG, "✗ Failed to update device: ${error.message}", error)
+                        continuation.resume(Result.failure(error))
+                    }
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "✗ Failed to update device: ${e.message}", e)
             Result.failure(e)
         }
     }

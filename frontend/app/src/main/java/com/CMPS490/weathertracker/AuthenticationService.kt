@@ -1,7 +1,10 @@
 package com.CMPS490.weathertracker
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import java.util.UUID
 
 class AuthenticationService(private val context: Context) {
@@ -42,6 +45,13 @@ class AuthenticationService(private val context: Context) {
         Log.d(TAG, "  Device ID:    $deviceId")
         Log.d(TAG, "")
 
+        // Check location permission status
+        val hasLocationPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        Log.d(TAG, "Location permission status: $hasLocationPermission")
+
         try {
             // Create anonymous user in database
             Log.d(TAG, "[1/2] Creating anonymous user record in Supabase...")
@@ -52,9 +62,9 @@ class AuthenticationService(private val context: Context) {
             }
             Log.d(TAG, "")
 
-            // Create device linked to user
+            // Create device linked to user with location permission status
             Log.d(TAG, "[2/2] Creating device record in Supabase...")
-            val deviceResult = SupabaseRepository.createDevice(deviceId, anonUserId)
+            val deviceResult = SupabaseRepository.createDevice(deviceId, anonUserId, hasLocationPermission)
             if (deviceResult.isFailure) {
                 Log.e(TAG, "✗ Failed to create device", deviceResult.exceptionOrNull())
                 throw deviceResult.exceptionOrNull() ?: Exception("Unknown error creating device")

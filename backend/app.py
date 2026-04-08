@@ -93,6 +93,13 @@ class RegisterDeviceTokenRequest(BaseModel):
     user_id: str | None = None
 
 
+class DeviceUpdateRequest(BaseModel):
+    """Update device attributes"""
+    device_id: str
+    location_permission_status: bool | None = None
+    last_seen_at: str | None = None
+
+
 class SendNotificationRequest(BaseModel):
     """Send notification request"""
     device_token: str
@@ -361,6 +368,76 @@ async def register_device_token(request: RegisterDeviceTokenRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error registering device: {str(e)}")
+
+
+@app.patch("/supabase/device")
+async def update_device(request: DeviceUpdateRequest):
+    """
+    Update device attributes like location_permission_status and last_seen_at.
+    Only updates fields that are provided (not None).
+    Corresponds to: PATCH /rest/v1/device
+    """
+    try:
+        print(f"\n[UPDATE-DEVICE] Received request:")
+        print(f"  device_id: {request.device_id}")
+        if request.location_permission_status is not None:
+            print(f"  location_permission_status: {request.location_permission_status}")
+        if request.last_seen_at is not None:
+            print(f"  last_seen_at: {request.last_seen_at}")
+        print(f"  Supabase URL: {SUPABASE_BASE}")
+        
+        async with httpx.AsyncClient() as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
+            }
+            
+            # Build update body with only provided fields
+            update_body = {}
+            if request.location_permission_status is not None:
+                update_body["location_permission_status"] = request.location_permission_status
+            if request.last_seen_at is not None:
+                update_body["last_seen_at"] = request.last_seen_at
+            
+            if not update_body:
+                return {
+                    "success": False,
+                    "error": "No fields to update"
+                }
+            
+            patch_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}"
+            
+            print(f"[PATCH] URL: {patch_url}")
+            print(f"[PATCH] Body: {update_body}")
+            
+            patch_response = await client.patch(
+                patch_url,
+                json=update_body,
+                headers=headers
+            )
+            
+            print(f"[PATCH] Status: {patch_response.status_code}")
+            print(f"[PATCH] Response: {patch_response.text[:200]}")
+            
+            if patch_response.status_code in [200, 201, 204]:
+                print(f"✓ Device updated successfully for: {request.device_id}")
+                return {
+                    "success": True,
+                    "message": "Device updated successfully",
+                    "device_id": request.device_id
+                }
+            else:
+                print(f"✗ Error updating device: {patch_response.text}")
+                return {
+                    "success": False,
+                    "error": f"Failed to update device: {patch_response.text}"
+                }
+    except Exception as e:
+        print(f"✗ Exception in update_device: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error updating device: {str(e)}")
 
 
 @app.post("/notifications/send")

@@ -3,6 +3,7 @@ package com.CMPS490.weathertracker.network
 import retrofit2.Call
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -45,6 +46,9 @@ interface BackendApi {
     
     @POST("supabase/device")
     fun createDevice(@Body record: JsonObject): Call<JsonObject>
+    
+    @PATCH("supabase/device")
+    fun updateDevice(@Body record: JsonObject): Call<JsonObject>
     
     // ===== ML PREDICTION =====
     @POST("predict")
