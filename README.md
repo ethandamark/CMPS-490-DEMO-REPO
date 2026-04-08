@@ -81,5 +81,3 @@ cp .env.example .env
 4. Connect the Android frontend to the backend API
 
 ## Contributors
-
-CMPS 490 Senior Project Team
