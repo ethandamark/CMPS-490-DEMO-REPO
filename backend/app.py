@@ -33,6 +33,10 @@ WEATHER_API_BASE = "https://api.weather.gov"
 RAINVIEWER_API_BASE = "https://api.rainviewer.com"
 SUPABASE_BASE = os.getenv("SUPABASE_BASE_URL", "http://localhost:54321")
 SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
+WEATHER_API_HEADERS = {
+    "User-Agent": os.getenv("WEATHER_API_USER_AGENT", "CMPS490WeatherTracker/1.0 (contact: dev@example.com)"),
+    "Accept": "application/geo+json, application/json",
+}
 
 # TODO: Import and load your ML prediction model here
 # from models.predictor import WeatherPredictor
@@ -40,6 +44,17 @@ SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEg
 
 
 # ============= UTILITY FUNCTIONS =============
+
+def upstream_error(service_name: str, response: httpx.Response) -> HTTPException:
+    """
+    Convert an upstream HTTP error into a FastAPI HTTPException while preserving
+    the upstream status code for the Android client.
+    """
+    body_preview = response.text[:500]
+    return HTTPException(
+        status_code=response.status_code,
+        detail=f"{service_name} upstream error: {body_preview}"
+    )
 
 def generate_alert_token() -> str:
     """
@@ -127,10 +142,17 @@ async def get_weather_points(lat: float, lon: float):
     Corresponds to: GET https://api.weather.gov/points/{lat},{lon}
     """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{WEATHER_API_BASE}/points/{lat},{lon}")
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(
+                f"{WEATHER_API_BASE}/points/{lat},{lon}",
+                headers=WEATHER_API_HEADERS
+            )
+            if response.is_error:
+                raise upstream_error("Weather points", response)
             return response.json()
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Weather API error: {str(e)}")
 
 
@@ -141,10 +163,14 @@ async def get_forecast(url: str):
     Corresponds to: GET from forecast URL
     """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(url, headers=WEATHER_API_HEADERS)
+            if response.is_error:
+                raise upstream_error("Forecast", response)
             return response.json()
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Forecast API error: {str(e)}")
 
 
@@ -155,10 +181,18 @@ async def get_alerts(point: str):
     Corresponds to: GET https://api.weather.gov/alerts/active?point={point}
     """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{WEATHER_API_BASE}/alerts/active", params={"point": point})
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(
+                f"{WEATHER_API_BASE}/alerts/active",
+                params={"point": point},
+                headers=WEATHER_API_HEADERS
+            )
+            if response.is_error:
+                raise upstream_error("Alerts", response)
             return response.json()
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Alerts API error: {str(e)}")
 
 

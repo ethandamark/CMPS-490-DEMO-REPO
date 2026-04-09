@@ -52,6 +52,7 @@ import com.CMPS490.weathertracker.network.PointResponse
 import com.CMPS490.weathertracker.network.RetrofitInstance
 import com.CMPS490.weathertracker.network.QuantitativeValue
 import com.CMPS490.weathertracker.network.AlertProperties
+import com.google.gson.Gson
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.google.android.gms.location.LocationServices
@@ -89,6 +90,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
 private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
 private const val RADAR_PLAYBACK_TICK_MS = 1500L
+private val gson = Gson()
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalPermissionsApi::class)
@@ -187,7 +189,10 @@ class MainActivity : ComponentActivity() {
                             temperature = 0,
                             condition = "Loading weather...",
                             highTemp = 0,
-                            lowTemp = 0
+                            lowTemp = 0,
+                            weatherType = WeatherType.PartlyCloudy,
+                            isDaytime = true,
+                            precipitationChance = 0
                         )
                     )
                 }
@@ -288,11 +293,16 @@ class MainActivity : ComponentActivity() {
                             if (activeRequestKey != requestKey) {
                                 return@getWeatherPoints
                             }
-                            val point = response
-                            val forecastUrl = point.getAsJsonObject("properties")?.get("forecast")?.asString
-                            val forecastHourlyUrl = point.getAsJsonObject("properties")?.get("forecastHourly")?.asString
+                            val point = runCatching {
+                                gson.fromJson(response, PointResponse::class.java)
+                            }.onFailure { error ->
+                                Log.e("MainActivity", "Failed to parse point response: ${error.message}. Raw body: $response", error)
+                            }.getOrNull()
+                            val forecastUrl = point?.properties?.forecast
+                            val forecastHourlyUrl = point?.properties?.forecastHourly
                             
                             if (forecastUrl == null) {
+                                Log.e("MainActivity", "Point response missing forecast URL. Raw body: $response")
                                 currentWeather = currentWeather.copy(condition = "No forecast available")
                                 forecastWeather = emptyList()
                                 return@getWeatherPoints
@@ -304,8 +314,14 @@ class MainActivity : ComponentActivity() {
                                     if (activeRequestKey != requestKey) {
                                         return@getForecast
                                     }
-                                    val periods = forecastResponse.getAsJsonObject("properties")?.getAsJsonArray("periods")?.map { it.asJsonObject } ?: emptyList()
-                                    if (periods.isEmpty()) {
+                                    val forecast = runCatching {
+                                        gson.fromJson(forecastResponse, ForecastResponse::class.java)
+                                    }.onFailure { error ->
+                                        Log.e("MainActivity", "Failed to parse forecast response: ${error.message}. Raw body: $forecastResponse", error)
+                                    }.getOrNull()
+                                    val forecastPeriods = forecast?.properties?.periods.orEmpty()
+                                    if (forecastPeriods.isEmpty()) {
+                                        Log.e("MainActivity", "Forecast response missing periods. Raw body: $forecastResponse")
                                         currentWeather = currentWeather.copy(condition = "No forecast available")
                                         forecastWeather = emptyList()
                                         return@getForecast
@@ -313,24 +329,6 @@ class MainActivity : ComponentActivity() {
 
                                     // Use geocoded location name, or fallback to coordinates
                                     val locationLabel = if (locationName.isNotEmpty()) locationName else "Lat: $lat, Lon: $lon"
-                                    val forecastPeriods = periods.map { it.asJsonObject }.map { periodObj ->
-                                        ForecastPeriod(
-                                            name = periodObj.get("name")?.asString ?: "",
-                                            startTime = periodObj.get("startTime")?.asString ?: "",
-                                            isDaytime = periodObj.get("isDaytime")?.asBoolean ?: true,
-                                            temperature = periodObj.get("temperature")?.asInt ?: 0,
-                                            temperatureUnit = periodObj.get("temperatureUnit")?.asString ?: "F",
-                                            windSpeed = periodObj.get("windSpeed")?.asString ?: "",
-                                            shortForecast = periodObj.get("shortForecast")?.asString ?: "",
-                                            detailedForecast = periodObj.get("detailedForecast")?.asString ?: "",
-                                            probabilityOfPrecipitation = periodObj.getAsJsonObject("probabilityOfPrecipitation")?.let { 
-                                                QuantitativeValue(it.get("value")?.asDouble) 
-                                            },
-                                            relativeHumidity = periodObj.getAsJsonObject("relativeHumidity")?.let { 
-                                                QuantitativeValue(it.get("value")?.asDouble) 
-                                            }
-                                        )
-                                    }
                                     currentWeather = mapCurrentWeather(locationLabel, forecastPeriods)
                                     forecastWeather = mapForecast(forecastPeriods)
 
@@ -348,12 +346,19 @@ class MainActivity : ComponentActivity() {
                                                 if (activeRequestKey != requestKey) {
                                                     return@getForecast
                                                 }
-                                                val hourlyPeriods = hourlyResponse.getAsJsonObject("properties")?.getAsJsonArray("periods")?.map { it.asJsonObject } ?: emptyList()
-                                                val hourlyNow = hourlyPeriods.firstOrNull()
+                                                val hourlyForecast = runCatching {
+                                                    gson.fromJson(hourlyResponse, ForecastResponse::class.java)
+                                                }.onFailure { error ->
+                                                    Log.e("MainActivity", "Failed to parse hourly forecast response: ${error.message}. Raw body: $hourlyResponse", error)
+                                                }.getOrNull()
+                                                val hourlyNow = hourlyForecast?.properties?.periods?.firstOrNull()
                                                 if (hourlyNow != null) {
                                                     currentWeather = currentWeather.copy(
-                                                        temperature = hourlyNow.get("temperature")?.asInt ?: 0,
-                                                        condition = hourlyNow.get("shortForecast")?.asString ?: ""
+                                                        temperature = hourlyNow.temperature,
+                                                        condition = hourlyNow.shortForecast,
+                                                        weatherType = toWeatherType(hourlyNow.shortForecast),
+                                                        isDaytime = hourlyNow.isDaytime,
+                                                        precipitationChance = hourlyNow.probabilityOfPrecipitation?.value?.toInt() ?: 0
                                                     )
                                                     WeatherApiCache.put(
                                                         lat = lat,
@@ -445,13 +450,18 @@ private fun mapCurrentWeather(
     val firstPeriod = periods.first()
     val dateLabel = formatDateLong(firstPeriod.startTime)
     val lowTemp = (firstPeriod.temperature - 8).coerceAtLeast(0)
+    val weatherType = toWeatherType(firstPeriod.shortForecast)
+    val precipitationChance = firstPeriod.probabilityOfPrecipitation?.value?.toInt() ?: 0
     return CurrentWeatherUiModel(
         location = locationLabel,
         dayDate = dateLabel,
         temperature = firstPeriod.temperature,
         condition = firstPeriod.shortForecast,
         highTemp = firstPeriod.temperature,
-        lowTemp = lowTemp
+        lowTemp = lowTemp,
+        weatherType = weatherType,
+        isDaytime = firstPeriod.isDaytime,
+        precipitationChance = precipitationChance
     )
 }
 
