@@ -72,6 +72,8 @@ class RegisterRequest(BaseModel):
     """Registration request â€” only device-side facts from frontend"""
     locationPermissionStatus: bool = False
     deviceToken: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 class RegisterDeviceTokenRequest(BaseModel):
     """Register FCM device token"""
@@ -248,18 +250,72 @@ async def register_device(request: RegisterRequest):
                     existing = existing_response.json()
                     if existing:
                         device = existing[0]
-                        print(f"[REGISTER] Existing device found: {device['device_id']}, returning existing credentials")
+                        device_id = device['device_id']
+                        print(f"[REGISTER] Existing device found: {device_id}, returning existing credentials")
                         # Update last_seen_at
                         now = datetime.now(timezone.utc).isoformat()
                         await client.patch(
-                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device['device_id']}",
+                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device_id}",
                             json={"last_seen_at": now, "location_permission_status": request.locationPermissionStatus},
                             headers=headers,
                         )
+                        
+                        # AUTO-POPULATE DEVICE LOCATION for existing device if permission granted + coords provided
+                        if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
+                            # Check if device_location already exists for this device
+                            existing_loc_response = await client.get(
+                                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{device_id}&order=captured_at.desc&limit=1",
+                                headers=headers,
+                            )
+                            existing_locs = existing_loc_response.json() if existing_loc_response.status_code == 200 else []
+                            
+                            if not existing_locs:
+                                print(f"[REGISTER] Auto-creating device_location for existing device (permission=true, coords provided)")
+                                location_record = {
+                                    "location_id": str(uuid.uuid4()),
+                                    "device_id": device_id,
+                                    "latitude": request.latitude,
+                                    "longitude": request.longitude,
+                                    "captured_at": now,
+                                }
+                                print(f"[REGISTER] location_record: {location_record}")
+                                loc_response = await client.post(
+                                    f"{SUPABASE_BASE}/rest/v1/device_location",
+                                    json=location_record,
+                                    headers=headers,
+                                )
+                                if loc_response.status_code in [200, 201]:
+                                    print(f"✓ Device location auto-created: {location_record['location_id']}")
+                                else:
+                                    print(f"✗ Failed to auto-create device_location: {loc_response.text}")
+                            else:
+                                # Update existing location with new coordinates
+                                existing_loc = existing_locs[0]
+                                location_id = existing_loc["location_id"]
+                                print(f"[REGISTER] Updating existing device_location {location_id} with new coords")
+                                print(f"[REGISTER] Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
+                                print(f"[REGISTER] New: lat={request.latitude}, lon={request.longitude}")
+                                
+                                update_response = await client.patch(
+                                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
+                                    json={
+                                        "latitude": request.latitude,
+                                        "longitude": request.longitude,
+                                        "captured_at": now,
+                                    },
+                                    headers=headers,
+                                )
+                                if update_response.status_code in [200, 204]:
+                                    print(f"✓ Device location updated: {location_id}")
+                                else:
+                                    print(f"✗ Failed to update device_location: {update_response.text}")
+                        else:
+                            print(f"[REGISTER] Skipping device_location for existing device: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
+                        
                         return {
                             "success": True,
                             "userId": device["anon_user_id"],
-                            "deviceId": device["device_id"],
+                            "deviceId": device_id,
                             "alertToken": device["alert_token"],
                         }
 
@@ -319,7 +375,31 @@ async def register_device(request: RegisterRequest):
             print(f"[REGISTER] Device response: {device_response.text[:200]}")
 
             if device_response.status_code in [200, 201]:
-                print(f"âœ“ Registered: user={anon_user_id}, device={device_id}")
+                print(f"✓ Registered: user={anon_user_id}, device={device_id}")
+                
+                # AUTO-POPULATE DEVICE LOCATION if permission granted + coords provided
+                if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
+                    print(f"[REGISTER] Auto-creating device_location (permission=true, coords provided)")
+                    location_record = {
+                        "location_id": str(uuid.uuid4()),
+                        "device_id": device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                    print(f"[REGISTER] location_record: {location_record}")
+                    loc_response = await client.post(
+                        f"{SUPABASE_BASE}/rest/v1/device_location",
+                        json=location_record,
+                        headers=headers,
+                    )
+                    if loc_response.status_code in [200, 201]:
+                        print(f"✓ Device location auto-created: {location_record['location_id']}")
+                    else:
+                        print(f"✗ Failed to auto-create device_location: {loc_response.text}")
+                else:
+                    print(f"[REGISTER] Skipping device_location: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
+                
                 return {
                     "success": True,
                     "userId": anon_user_id,
@@ -327,7 +407,7 @@ async def register_device(request: RegisterRequest):
                     "alertToken": alert_token,
                 }
             else:
-                print(f"âœ— Error creating device: {device_response.text}")
+                print(f"✗ Error creating device: {device_response.text}")
                 return {"success": False, "error": f"Device creation failed: {device_response.text}"}
     except Exception as e:
         print(f"âœ— Exception in register_device: {str(e)}")
@@ -910,6 +990,112 @@ async def get_latest_device_location(device_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/device-location/update-current")
+async def update_current_device_location(request: CreateDeviceLocationRequest):
+    """
+    Update or create the current location for a device (upsert behavior).
+    Used by background location tracking service.
+    - If a location exists for the device, updates it
+    - If no location exists, creates a new one
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION UPDATE-CURRENT] Request:")
+        print(f"  device_id: {request.device_id}")
+        print(f"  latitude:  {request.latitude}")
+        print(f"  longitude: {request.longitude}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+            
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Check if location exists for this device
+            existing_response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{request.device_id}&order=captured_at.desc&limit=1",
+                headers=headers,
+            )
+            existing_locs = existing_response.json() if existing_response.status_code == 200 else []
+            
+            if existing_locs:
+                # Update existing location
+                existing_loc = existing_locs[0]
+                location_id = existing_loc["location_id"]
+                print(f"[UPDATE-CURRENT] Updating existing location: {location_id}")
+                print(f"  Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
+                print(f"  New: lat={request.latitude}, lon={request.longitude}")
+                
+                response = await client.patch(
+                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
+                    json={
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    },
+                    headers=headers,
+                )
+                
+                if response.status_code in [200, 204]:
+                    print(f"✓ Location updated: {location_id}")
+                    return {
+                        "success": True,
+                        "action": "updated",
+                        "location_id": location_id,
+                        "device_id": request.device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                else:
+                    print(f"✗ Failed to update: {response.text}")
+                    raise HTTPException(status_code=500, detail=response.text)
+            else:
+                # Create new location
+                location_id = str(uuid.uuid4())
+                print(f"[UPDATE-CURRENT] Creating new location: {location_id}")
+                
+                location_record = {
+                    "location_id": location_id,
+                    "device_id": request.device_id,
+                    "latitude": request.latitude,
+                    "longitude": request.longitude,
+                    "captured_at": now,
+                }
+                
+                response = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/device_location",
+                    json=location_record,
+                    headers=headers,
+                )
+                
+                if response.status_code in [200, 201]:
+                    print(f"✓ Location created: {location_id}")
+                    return {
+                        "success": True,
+                        "action": "created",
+                        "location_id": location_id,
+                        "device_id": request.device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                else:
+                    print(f"✗ Failed to create: {response.text}")
+                    raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in update_current_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============= ML PREDICTION ENDPOINT =============
 
 @app.post("/predict", response_model=PredictionResponse)
@@ -930,5 +1116,6 @@ async def predict(request: PredictionRequest):
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     reload = os.getenv('DEBUG', 'False') == 'True'
-    uvicorn.run(app, host='127.0.0.1', port=port, reload=reload)
+    # Use 0.0.0.0 to accept connections from Android emulator (10.0.2.2)
+    uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
 from datetime import datetime

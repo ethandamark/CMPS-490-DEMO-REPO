@@ -91,6 +91,14 @@ interface BackendApi {
     fun getLatestDeviceLocation(@Path("device_id") deviceId: String): Call<JsonObject>
     
     /**
+     * Update or create the current location for a device (upsert behavior).
+     * Used by background location tracking service.
+     * Required: device_id, latitude, longitude
+     */
+    @POST("device-location/update-current")
+    fun updateCurrentDeviceLocation(@Body request: JsonObject): Call<JsonObject>
+    
+    /**
      * Update a device location record
      * Optional fields: latitude, longitude, captured_at
      */

@@ -141,14 +141,19 @@ object BackendRepository {
     fun register(
         locationPermissionStatus: Boolean = false,
         deviceToken: String? = null,
+        latitude: Double? = null,
+        longitude: Double? = null,
         onSuccess: (userId: String, deviceId: String) -> Unit,
         onError: (Exception) -> Unit
     ) {
         try {
             Log.d(TAG, "→ Requesting backend to register user + device...")
+            Log.d(TAG, "  locationPermissionStatus=$locationPermissionStatus, lat=$latitude, lon=$longitude")
             val record = JsonObject().apply {
                 addProperty("locationPermissionStatus", locationPermissionStatus)
                 deviceToken?.let { addProperty("deviceToken", it) }
+                latitude?.let { addProperty("latitude", it) }
+                longitude?.let { addProperty("longitude", it) }
             }
             
             val call = api.register(record)
@@ -420,6 +425,51 @@ object BackendRepository {
             })
         } catch (e: Exception) {
             Log.e(TAG, "✗ Error creating device location: ${e.message}", e)
+            onError(e)
+        }
+    }
+    
+    /**
+     * Update or create the current location for a device (upsert behavior).
+     * Used by background location tracking service.
+     */
+    fun updateCurrentDeviceLocation(
+        deviceId: String,
+        latitude: Double,
+        longitude: Double,
+        onSuccess: (locationId: String, action: String) -> Unit,
+        onError: (Exception) -> Unit
+    ) {
+        try {
+            Log.d(TAG, "→ Updating current location for device: $deviceId at ($latitude, $longitude)")
+            val record = JsonObject().apply {
+                addProperty("device_id", deviceId)
+                addProperty("latitude", latitude)
+                addProperty("longitude", longitude)
+            }
+            
+            val call = api.updateCurrentDeviceLocation(record)
+            call.enqueue(object : Callback<JsonObject> {
+                override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
+                    if (response.isSuccessful && response.body() != null) {
+                        val body = response.body()!!
+                        val locId = body.get("location_id")?.asString ?: ""
+                        val action = body.get("action")?.asString ?: "unknown"
+                        Log.d(TAG, "✓ Device location $action: $locId")
+                        onSuccess(locId, action)
+                    } else {
+                        Log.e(TAG, "✗ Update current location error: ${response.code()} - ${response.errorBody()?.string()}")
+                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
+                    }
+                }
+                
+                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
+                    Log.e(TAG, "✗ Update current location failure: ${t.message}", t)
+                    onError(t as Exception)
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "✗ Error updating current location: ${e.message}", e)
             onError(e)
         }
     }
