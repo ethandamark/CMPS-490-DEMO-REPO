@@ -83,6 +83,13 @@ class LocationTrackingService : Service() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
     private var isTracking = false
+
+    // Last saved location — only update backend when it changes
+    private var lastLatitude: Double? = null
+    private var lastLongitude: Double? = null
+
+    // Minimum distance change (in meters) to trigger a backend update
+    private val MIN_DISTANCE_CHANGE_METERS = 50f
     
     override fun onCreate() {
         super.onCreate()
@@ -101,7 +108,15 @@ class LocationTrackingService : Service() {
                     Log.d(TAG, "   Longitude: ${location.longitude}")
                     Log.d(TAG, "   Accuracy:  ${location.accuracy}m")
                     Log.d(TAG, "   Time:      ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}")
-                    updateLocationInBackend(location.latitude, location.longitude)
+
+                    if (hasLocationChanged(location.latitude, location.longitude)) {
+                        Log.d(TAG, "   ↗ Location changed, updating backend")
+                        lastLatitude = location.latitude
+                        lastLongitude = location.longitude
+                        updateLocationInBackend(location.latitude, location.longitude)
+                    } else {
+                        Log.d(TAG, "   ⏸ Location unchanged, skipping backend update")
+                    }
                 } ?: Log.w(TAG, "   ⚠ lastLocation was null!")
                 Log.d(TAG, "")
             }
@@ -213,6 +228,17 @@ class LocationTrackingService : Service() {
         }
     }
     
+    private fun hasLocationChanged(newLat: Double, newLon: Double): Boolean {
+        val prevLat = lastLatitude ?: return true  // No previous location, always update
+        val prevLon = lastLongitude ?: return true
+
+        val results = FloatArray(1)
+        android.location.Location.distanceBetween(prevLat, prevLon, newLat, newLon, results)
+        val distanceMeters = results[0]
+        Log.d(TAG, "   Distance from last saved location: ${"%.1f".format(distanceMeters)}m (threshold: ${MIN_DISTANCE_CHANGE_METERS}m)")
+        return distanceMeters >= MIN_DISTANCE_CHANGE_METERS
+    }
+
     private fun updateLocationInBackend(latitude: Double, longitude: Double) {
         val authService = AuthenticationService(this)
         val deviceId = authService.getStoredDeviceId()
