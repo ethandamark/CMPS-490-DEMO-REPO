@@ -700,7 +700,7 @@ async def delete_alert(alert_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============= DEVICE LOCATION API =============
+# ============= DEVICE LOCATION API ============
 
 @app.post("/device-location/create")
 async def create_device_location(request: CreateDeviceLocationRequest):

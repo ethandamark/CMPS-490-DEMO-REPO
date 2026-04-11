@@ -53,6 +53,13 @@ import com.CMPS490.weathertracker.network.PointResponse
 import com.CMPS490.weathertracker.network.RetrofitInstance
 import com.CMPS490.weathertracker.network.QuantitativeValue
 import com.CMPS490.weathertracker.network.AlertProperties
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -108,7 +115,13 @@ class MainActivity : ComponentActivity() {
                 var registrationComplete by remember { mutableStateOf(false) }
                 var storedDeviceId by remember { mutableStateOf<String?>(null) }
                 var permissionDialogShown by remember { mutableStateOf(false) }
-                var backgroundPermissionRequested by remember { mutableStateOf(false) }
+
+                // Use SharedPreferences to persist permission request state across Activity recreation
+                val prefs = remember { context.getSharedPreferences("weather_tracker_prefs", android.content.Context.MODE_PRIVATE) }
+                var locationPromptAnswered by remember { 
+                    mutableStateOf(prefs.getBoolean("location_prompt_answered", false)) 
+                }
+                var showLocationDialog by remember { mutableStateOf(false) }
 
                 val locationPermissionState = rememberMultiplePermissionsState(
                     permissions = listOf(
@@ -116,32 +129,111 @@ class MainActivity : ComponentActivity() {
                         Manifest.permission.ACCESS_COARSE_LOCATION
                     )
                 ) {
-                    // This callback fires when permission dialog is dismissed
+                    // This callback fires when returning from Settings
                     permissionDialogShown = true
                 }
 
-                // Background location permission (Android 10+)
-                // Must be requested AFTER foreground location is granted
+                // Background location permission state (for checking only, not requesting)
                 val backgroundLocationPermissionState = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     rememberPermissionState(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 } else {
                     null
                 }
 
-                LaunchedEffect(Unit) {
-                    locationPermissionState.launchMultiplePermissionRequest()
+                // Function to open app's location permission settings directly
+                // This opens Settings where user sees ALL options:
+                // "Allow all the time", "Allow only while using the app", "Ask every time", "Don't allow"
+                fun openLocationPermissionSettings() {
+                    try {
+                        // Try to open the app permissions page directly (shows list of permissions)
+                        // User just needs to tap "Location" to see all 4 options
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                        }
+                        context.startActivity(intent)
+                        
+                        // Show a toast to guide the user
+                        android.widget.Toast.makeText(
+                            context,
+                            "Tap 'Permissions' then 'Location'",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "Could not open settings: ${e.message}")
+                    }
                 }
 
-                // Request background location after foreground is granted (Android 10+)
+                // Show custom location dialog on first launch
+                LaunchedEffect(Unit) {
+                    if (!locationPromptAnswered && !locationPermissionState.allPermissionsGranted) {
+                        showLocationDialog = true
+                    } else if (locationPermissionState.allPermissionsGranted) {
+                        // Already granted, mark as complete
+                        permissionDialogShown = true
+                        locationPromptAnswered = true
+                    }
+                }
+
+                // Custom Location Permission Dialog
+                if (showLocationDialog) {
+                    AlertDialog(
+                        onDismissRequest = { 
+                            // User dismissed - treat as "Don't Allow"
+                            showLocationDialog = false
+                            locationPromptAnswered = true
+                            prefs.edit().putBoolean("location_prompt_answered", true).apply()
+                            permissionDialogShown = true
+                        },
+                        title = {
+                            Text(
+                                text = "Location Access",
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        },
+                        text = {
+                            Text(
+                                text = "Do you want to allow WeatherTracker precise/approx. location for in app tracking?",
+                                color = Color.White.copy(alpha = 0.9f)
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    showLocationDialog = false
+                                    locationPromptAnswered = true
+                                    prefs.edit().putBoolean("location_prompt_answered", true).apply()
+                                    // Open app's location permission settings directly
+                                    openLocationPermissionSettings()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF4CAF50)
+                                )
+                            ) {
+                                Text("Allow Location", color = Color.White)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    showLocationDialog = false
+                                    locationPromptAnswered = true
+                                    prefs.edit().putBoolean("location_prompt_answered", true).apply()
+                                    permissionDialogShown = true
+                                }
+                            ) {
+                                Text("Don't Allow", color = Color.White.copy(alpha = 0.7f))
+                            }
+                        },
+                        containerColor = Color(0xFF1E3A5F),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                }
+
+                // Check permission state when returning from Settings
                 LaunchedEffect(locationPermissionState.allPermissionsGranted) {
-                    if (locationPermissionState.allPermissionsGranted && 
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                        backgroundLocationPermissionState != null &&
-                        !backgroundLocationPermissionState.status.isGranted &&
-                        !backgroundPermissionRequested) {
-                        Log.d("MainActivity", "Requesting background location permission...")
-                        backgroundPermissionRequested = true
-                        backgroundLocationPermissionState.launchPermissionRequest()
+                    if (locationPermissionState.allPermissionsGranted && locationPromptAnswered) {
+                        permissionDialogShown = true
                     }
                 }
 
@@ -162,26 +254,41 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Run registration AFTER permission dialog is answered (for new users)
+                // Track if registration is in progress to prevent duplicate calls
+                var registrationInProgress by remember { mutableStateOf(false) }
+
+                // Run registration AFTER location dialog is answered (for new users)
                 // Or immediately if credentials already exist
-                LaunchedEffect(permissionDialogShown, Unit) {
-                    if (registrationComplete) return@LaunchedEffect
+                LaunchedEffect(locationPromptAnswered, permissionDialogShown) {
+                    // Skip if already registered or registration in progress
+                    if (registrationComplete || registrationInProgress) return@LaunchedEffect
                     
                     val authService = AuthenticationService(context)
-                    val hasExistingCredentials = authService.getStoredDeviceId() != null
+                    val existingDeviceId = authService.getStoredDeviceId()
                     
-                    // For new users, wait for permission dialog
-                    // For existing users, proceed immediately
-                    if (!hasExistingCredentials && !permissionDialogShown) {
+                    // If we already have credentials, just restore them and mark complete
+                    if (existingDeviceId != null) {
+                        Log.d("MainActivity", "✓ Existing credentials found: $existingDeviceId")
+                        storedDeviceId = existingDeviceId
+                        registrationComplete = true
                         return@LaunchedEffect
                     }
+                    
+                    // For new users, wait for location dialog to be answered
+                    val permissionFlowComplete = locationPromptAnswered || permissionDialogShown
+                    if (!permissionFlowComplete) {
+                        return@LaunchedEffect
+                    }
+                    
+                    // Set in-progress flag BEFORE starting registration to prevent duplicates
+                    registrationInProgress = true
                     
                     Log.d("MainActivity", "\n\n")
                     Log.d("MainActivity", "╔═══════════════════════════════════════════════════════════╗")
                     Log.d("MainActivity", "║         STARTING WEATHER TRACKER APPLICATION             ║")
                     Log.d("MainActivity", "╚═══════════════════════════════════════════════════════════╝")
                     Log.d("MainActivity", "")
-                    Log.d("MainActivity", "Permission granted=${locationPermissionState.allPermissionsGranted}, existing=$hasExistingCredentials")
+                    Log.d("MainActivity", "Permission granted=${locationPermissionState.allPermissionsGranted}")
                     
                     try {
                         val (userId, deviceId) = authService.initializeFirstRun()
@@ -215,6 +322,7 @@ class MainActivity : ComponentActivity() {
                         Log.e("MainActivity", "✗ Authentication failed - ${e.message}", e)
                         Log.e("MainActivity", "Make sure the backend server is running: 'python app.py'")
                         Log.e("MainActivity", "")
+                        registrationInProgress = false // Allow retry on failure
                     }
                 }
 
@@ -231,9 +339,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Continuously update UI location when device location changes
+                // Continuously update UI location AND backend when device location changes
                 @SuppressLint("MissingPermission")
-                DisposableEffect(locationPermissionState.allPermissionsGranted, registrationComplete) {
+                DisposableEffect(locationPermissionState.allPermissionsGranted, registrationComplete, storedDeviceId) {
                     var locationCallback: com.google.android.gms.location.LocationCallback? = null
                     
                     if (locationPermissionState.allPermissionsGranted && registrationComplete) {
@@ -252,6 +360,22 @@ class MainActivity : ComponentActivity() {
                                     if (userLocation != newLocation) {
                                         Log.d("MainActivity", "📍 UI location updated: lat=${location.latitude}, lon=${location.longitude}")
                                         userLocation = newLocation
+                                        
+                                        // Also update the backend with the new location
+                                        storedDeviceId?.let { deviceId ->
+                                            Log.d("MainActivity", "📤 Sending location to backend: device=$deviceId")
+                                            BackendRepository.updateCurrentDeviceLocation(
+                                                deviceId = deviceId,
+                                                latitude = location.latitude,
+                                                longitude = location.longitude,
+                                                onSuccess = { locationId, action ->
+                                                    Log.d("MainActivity", "✓ Backend location $action: $locationId")
+                                                },
+                                                onError = { e ->
+                                                    Log.e("MainActivity", "✗ Backend location update failed: ${e.message}")
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
