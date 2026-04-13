@@ -5,11 +5,18 @@ import logging
 import math
 from typing import Any, Dict, Iterable, List
 
-from sqlalchemy import desc
-from sqlalchemy.orm import Session
+import requests as _http
 
-from config import AREA_CELL_PRECISION
-from database import AreaWeatherSnapshot
+from config import AREA_CELL_PRECISION, SUPABASE_BASE_URL, SUPABASE_API_KEY
+
+
+# ── Supabase REST helpers ───────────────────────────────────────────
+
+_SB_HEADERS: dict[str, str] = {
+    "apikey": SUPABASE_API_KEY,
+    "Content-Type": "application/json",
+}
+_SB_TIMEOUT = 15
 
 
 logger = logging.getLogger(__name__)
@@ -159,38 +166,38 @@ def _safe_max(values: Iterable[float | None]) -> float | None:
     return max(filtered) if filtered else None
 
 
-def _to_record(snapshot: AreaWeatherSnapshot) -> Dict[str, Any]:
-    dew_point = _coerce_float(snapshot.dew_point_c)
-    temp_c = _coerce_float(snapshot.temp_c)
+def _to_record(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a Supabase REST row dict into the internal record format."""
+    dew_point = _coerce_float(snapshot.get("dew_point_c"))
+    temp_c = _coerce_float(snapshot.get("temp_c"))
     if dew_point is None and temp_c is not None:
         dew_point = temp_c - 5.0
 
     return {
-        "timestamp": snapshot.timestamp,
-        "temp_c": _coerce_float(snapshot.temp_c),
+        "timestamp": snapshot.get("timestamp"),
+        "temp_c": temp_c,
         "dew_point_c": dew_point,
-        "pressure_hPa": _coerce_float(snapshot.pressure_hPa),
-        "humidity_pct": _coerce_float(snapshot.humidity_pct),
-        "wind_speed_kmh": _coerce_float(snapshot.wind_speed_kmh),
-        "precip_mm": _coerce_float(snapshot.precip_mm),
-        "latitude": _coerce_float(snapshot.representative_lat),
-        "longitude": _coerce_float(snapshot.representative_lon),
-        "elevation": _coerce_float(snapshot.elevation),
-        "nwp_cape_f3_6_max": _coerce_float(snapshot.nwp_cape_f3_6_max),
-        "nwp_cin_f3_6_max": _coerce_float(snapshot.nwp_cin_f3_6_max),
-        "nwp_pwat_f3_6_max": _coerce_float(snapshot.nwp_pwat_f3_6_max),
-        "nwp_srh03_f3_6_max": _coerce_float(snapshot.nwp_srh03_f3_6_max),
-        "nwp_li_f3_6_min": _coerce_float(snapshot.nwp_li_f3_6_min),
-        "nwp_lcl_f3_6_min": _coerce_float(snapshot.nwp_lcl_f3_6_min),
-        "nwp_available_leads": _coerce_float(snapshot.nwp_available_leads),
-        "mrms_max_dbz_75km": _coerce_float(snapshot.mrms_max_dbz_75km),
+        "pressure_hPa": _coerce_float(snapshot.get("pressure_hpa")),
+        "humidity_pct": _coerce_float(snapshot.get("humidity_pct")),
+        "wind_speed_kmh": _coerce_float(snapshot.get("wind_speed_kmh")),
+        "precip_mm": _coerce_float(snapshot.get("precip_mm")),
+        "latitude": _coerce_float(snapshot.get("representative_lat")),
+        "longitude": _coerce_float(snapshot.get("representative_lon")),
+        "elevation": _coerce_float(snapshot.get("elevation")),
+        "nwp_cape_f3_6_max": _coerce_float(snapshot.get("nwp_cape_f3_6_max")),
+        "nwp_cin_f3_6_max": _coerce_float(snapshot.get("nwp_cin_f3_6_max")),
+        "nwp_pwat_f3_6_max": _coerce_float(snapshot.get("nwp_pwat_f3_6_max")),
+        "nwp_srh03_f3_6_max": _coerce_float(snapshot.get("nwp_srh03_f3_6_max")),
+        "nwp_li_f3_6_min": _coerce_float(snapshot.get("nwp_li_f3_6_min")),
+        "nwp_lcl_f3_6_min": _coerce_float(snapshot.get("nwp_lcl_f3_6_min")),
+        "nwp_available_leads": _coerce_float(snapshot.get("nwp_available_leads")),
+        "mrms_max_dbz_75km": _coerce_float(snapshot.get("mrms_max_dbz_75km")),
     }
 
 
 # ── Public API ──────────────────────────────────────────────────────
 
 def assemble_live_features(
-    db: Session,
     area_key: str,
     representative_lat: float,
     representative_lon: float,
@@ -200,8 +207,6 @@ def assemble_live_features(
 
     Parameters
     ----------
-    db : Session
-        Active SQLAlchemy session.
     area_key : str
         Geohash key for the area.
     representative_lat, representative_lon : float
@@ -236,58 +241,62 @@ def assemble_live_features(
     if dist_to_coast_km is None:
         dist_to_coast_km = _distance_to_gulf_coast(latitude, longitude)
 
+    sb_url = f"{SUPABASE_BASE_URL}/rest/v1/area_weather_snapshot"
+
     # ── Prune snapshots older than 48 hours ─────────────────────────
     cutoff = valid_time - datetime.timedelta(hours=48)
-    db.query(AreaWeatherSnapshot).filter(
-        AreaWeatherSnapshot.area_key == area_key,
-        AreaWeatherSnapshot.timestamp < cutoff,
-    ).delete(synchronize_session="fetch")
+    _http.delete(
+        sb_url,
+        params={"area_key": f"eq.{area_key}", "timestamp": f"lt.{cutoff.isoformat()}"},
+        headers=_SB_HEADERS,
+        timeout=_SB_TIMEOUT,
+    )
 
     # ── Upsert current hour's snapshot ──────────────────────────────
-    existing = (
-        db.query(AreaWeatherSnapshot)
-        .filter(
-            AreaWeatherSnapshot.area_key == area_key,
-            AreaWeatherSnapshot.timestamp == valid_time,
-        )
-        .first()
+    snapshot_data = {
+        "area_key": area_key,
+        "timestamp": valid_time.isoformat(),
+        "representative_lat": latitude,
+        "representative_lon": longitude,
+        "temp_c": temp_c,
+        "dew_point_c": dew_point_c,
+        "pressure_hpa": _coerce_float(obs.get("pressure_hPa")),
+        "humidity_pct": _coerce_float(obs.get("humidity_pct")),
+        "wind_speed_kmh": _coerce_float(obs.get("wind_speed_kmh")),
+        "precip_mm": _coerce_float(obs.get("precip_mm")),
+        "elevation": _coerce_float(static.get("elevation")),
+        "nwp_cape_f3_6_max": _coerce_float(nwp.get("nwp_cape_f3_6_max")),
+        "nwp_cin_f3_6_max": _coerce_float(nwp.get("nwp_cin_f3_6_max")),
+        "nwp_pwat_f3_6_max": _coerce_float(nwp.get("nwp_pwat_f3_6_max")),
+        "nwp_srh03_f3_6_max": _coerce_float(nwp.get("nwp_srh03_f3_6_max")),
+        "nwp_li_f3_6_min": _coerce_float(nwp.get("nwp_li_f3_6_min")),
+        "nwp_lcl_f3_6_min": _coerce_float(nwp.get("nwp_lcl_f3_6_min")),
+        "nwp_available_leads": _coerce_float(nwp.get("nwp_available_leads")),
+        "mrms_max_dbz_75km": _coerce_float(radar.get("mrms_max_dbz_75km")),
+    }
+    _http.post(
+        sb_url,
+        params={"on_conflict": "area_key,timestamp"},
+        json=snapshot_data,
+        headers={**_SB_HEADERS, "Prefer": "resolution=merge-duplicates"},
+        timeout=_SB_TIMEOUT,
     )
-
-    snapshot = existing or AreaWeatherSnapshot(area_key=area_key, timestamp=valid_time)
-    snapshot.representative_lat = latitude
-    snapshot.representative_lon = longitude
-    snapshot.temp_c = temp_c
-    snapshot.dew_point_c = dew_point_c
-    snapshot.pressure_hPa = _coerce_float(obs.get("pressure_hPa"))
-    snapshot.humidity_pct = _coerce_float(obs.get("humidity_pct"))
-    snapshot.wind_speed_kmh = _coerce_float(obs.get("wind_speed_kmh"))
-    snapshot.precip_mm = _coerce_float(obs.get("precip_mm"))
-    snapshot.elevation = _coerce_float(static.get("elevation"))
-    snapshot.nwp_cape_f3_6_max = _coerce_float(nwp.get("nwp_cape_f3_6_max"))
-    snapshot.nwp_cin_f3_6_max = _coerce_float(nwp.get("nwp_cin_f3_6_max"))
-    snapshot.nwp_pwat_f3_6_max = _coerce_float(nwp.get("nwp_pwat_f3_6_max"))
-    snapshot.nwp_srh03_f3_6_max = _coerce_float(nwp.get("nwp_srh03_f3_6_max"))
-    snapshot.nwp_li_f3_6_min = _coerce_float(nwp.get("nwp_li_f3_6_min"))
-    snapshot.nwp_lcl_f3_6_min = _coerce_float(nwp.get("nwp_lcl_f3_6_min"))
-    snapshot.nwp_available_leads = _coerce_float(nwp.get("nwp_available_leads"))
-    snapshot.mrms_max_dbz_75km = _coerce_float(radar.get("mrms_max_dbz_75km"))
-
-    if existing is None:
-        db.add(snapshot)
-    db.flush()
 
     # ── Build history window (last 24 hours) ────────────────────────
-    history_rows = (
-        db.query(AreaWeatherSnapshot)
-        .filter(
-            AreaWeatherSnapshot.area_key == area_key,
-            AreaWeatherSnapshot.timestamp <= valid_time,
-        )
-        .order_by(desc(AreaWeatherSnapshot.timestamp))
-        .limit(24)
-        .all()
+    resp = _http.get(
+        sb_url,
+        params={
+            "area_key": f"eq.{area_key}",
+            "timestamp": f"lte.{valid_time.isoformat()}",
+            "order": "timestamp.desc",
+            "limit": "24",
+        },
+        headers=_SB_HEADERS,
+        timeout=_SB_TIMEOUT,
     )
-    history = [_to_record(row) for row in reversed(history_rows)]
+    if resp.status_code != 200:
+        raise FeatureAssemblyError(f"Failed to query snapshot history: {resp.text}")
+    history = [_to_record(row) for row in reversed(resp.json())]
     current = history[-1]
 
     temp_spreads: List[float | None] = []

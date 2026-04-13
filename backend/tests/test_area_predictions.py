@@ -75,29 +75,72 @@ class TestGeohash:
         assert re_hash == ghash
 
 
-# ── Feature assembly with area snapshots ────────────────────────────
+# ── Feature assembly with area snapshots (REST-mocked) ──────────────
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from database import Base, AreaWeatherSnapshot, AreaAlertState
+def _make_snapshot_row(
+    area_key="9vuf1",
+    timestamp="2026-04-13T12:00:00+00:00",
+    temp_c=25.0,
+    dew_point_c=18.0,
+    pressure_hpa=1013.0,
+    humidity_pct=65.0,
+    wind_speed_kmh=15.0,
+    precip_mm=0.0,
+    elevation=10.0,
+    representative_lat=30.22,
+    representative_lon=-92.02,
+    **extras,
+) -> dict:
+    """Build a dict shaped like a PostgREST area_weather_snapshot row."""
+    row = {
+        "id": extras.pop("id", 1),
+        "area_key": area_key,
+        "timestamp": timestamp,
+        "representative_lat": representative_lat,
+        "representative_lon": representative_lon,
+        "temp_c": temp_c,
+        "dew_point_c": dew_point_c,
+        "pressure_hpa": pressure_hpa,
+        "humidity_pct": humidity_pct,
+        "wind_speed_kmh": wind_speed_kmh,
+        "precip_mm": precip_mm,
+        "elevation": elevation,
+        "nwp_cape_f3_6_max": None,
+        "nwp_cin_f3_6_max": None,
+        "nwp_pwat_f3_6_max": None,
+        "nwp_srh03_f3_6_max": None,
+        "nwp_li_f3_6_min": None,
+        "nwp_lcl_f3_6_min": None,
+        "nwp_available_leads": None,
+        "mrms_max_dbz_75km": None,
+    }
+    row.update(extras)
+    return row
 
 
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session for testing."""
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    yield session
-    session.close()
+def _mock_response(status_code=200, json_data=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data if json_data is not None else []
+    resp.text = ""
+    return resp
 
 
 class TestFeatureAssemblyArea:
-    """Feature assembly works with area snapshots."""
+    """Feature assembly works with area snapshots (mocked REST)."""
 
-    def test_single_snapshot_produces_features(self, db_session):
+    @patch("lib.ml.feature_assembly_service._http")
+    def test_single_snapshot_produces_features(self, mock_http):
         """A single stored snapshot should yield a valid feature dict."""
         from lib.ml.feature_assembly_service import assemble_live_features
+
+        # DELETE (prune) → success, POST (upsert) → success
+        mock_http.delete.return_value = _mock_response(200)
+        mock_http.post.return_value = _mock_response(201)
+
+        # GET (history) returns the snapshot that was just upserted
+        history_row = _make_snapshot_row()
+        mock_http.get.return_value = _mock_response(200, [history_row])
 
         request_data = {
             "valid_time_utc": "2026-04-13T12:00:00Z",
@@ -115,13 +158,11 @@ class TestFeatureAssemblyArea:
         }
 
         result = assemble_live_features(
-            db=db_session,
             area_key="9vuf1",
             representative_lat=30.22,
             representative_lon=-92.02,
             request_data=request_data,
         )
-        db_session.commit()
 
         assert result["temp_c"] == 25.0
         assert result["pressure_hPa"] == 1013.0
@@ -130,32 +171,32 @@ class TestFeatureAssemblyArea:
         assert "precip_24h" in result
         assert "pressure_change_6h" in result
 
-    def test_multiple_snapshots_compute_lag_features(self, db_session):
+    @patch("lib.ml.feature_assembly_service._http")
+    def test_multiple_snapshots_compute_lag_features(self, mock_http):
         """With 6 historical rows + current, lag features should be non-None."""
         from lib.ml.feature_assembly_service import assemble_live_features
 
         base_time = datetime.datetime(2026, 4, 13, 6, 0, 0, tzinfo=datetime.timezone.utc)
 
-        # Insert 6 historical snapshots
-        for i in range(6):
+        # Build 7 history rows (6 historical + 1 current) ordered desc
+        history_rows = []
+        for i in range(6, -1, -1):
             ts = base_time + datetime.timedelta(hours=i)
-            snap = AreaWeatherSnapshot(
-                area_key="9vuf1",
-                timestamp=ts,
-                representative_lat=30.22,
-                representative_lon=-92.02,
-                temp_c=20.0 + i,
-                dew_point_c=15.0,
-                pressure_hPa=1013.0 - i * 0.5,
-                humidity_pct=60.0,
-                wind_speed_kmh=10.0 + i,
-                precip_mm=0.0 if i < 4 else 1.0,
-                elevation=10.0,
+            history_rows.append(
+                _make_snapshot_row(
+                    id=i + 1,
+                    timestamp=ts.isoformat(),
+                    temp_c=20.0 + i,
+                    pressure_hpa=1013.0 - i * 0.5,
+                    wind_speed_kmh=10.0 + i,
+                    precip_mm=0.0 if i < 4 else 1.0,
+                )
             )
-            db_session.add(snap)
-        db_session.flush()
 
-        # Now assemble for hour 7
+        mock_http.delete.return_value = _mock_response(200)
+        mock_http.post.return_value = _mock_response(201)
+        mock_http.get.return_value = _mock_response(200, history_rows)
+
         request_data = {
             "valid_time_utc": (base_time + datetime.timedelta(hours=6)).isoformat(),
             "current_observation": {
@@ -172,60 +213,12 @@ class TestFeatureAssemblyArea:
         }
 
         result = assemble_live_features(
-            db=db_session,
             area_key="9vuf1",
             representative_lat=30.22,
             representative_lon=-92.02,
             request_data=request_data,
         )
-        db_session.commit()
 
         assert result["pressure_change_6h"] is not None
         assert result["precip_6h"] > 0
         assert result["wind_speed_change_3h"] is not None
-
-
-# ── Area alert state lifecycle ──────────────────────────────────────
-
-class TestAreaAlertState:
-    """Alert lifecycle transitions on area_alert_state."""
-
-    def test_create_default_state(self, db_session):
-        """New area starts with alert_active=False."""
-        state = AreaAlertState(area_key="9vuf1", alert_active=False)
-        db_session.add(state)
-        db_session.commit()
-
-        loaded = db_session.query(AreaAlertState).filter_by(area_key="9vuf1").first()
-        assert loaded is not None
-        assert loaded.alert_active is False
-        assert loaded.last_risk_score is None
-
-    def test_activate_alert(self, db_session):
-        """Setting alert_active=True persists."""
-        state = AreaAlertState(area_key="9vuf1", alert_active=False)
-        db_session.add(state)
-        db_session.flush()
-
-        state.alert_active = True
-        state.last_risk_score = 0.85
-        state.last_risk_level = "high"
-        state.last_prediction_utc = datetime.datetime.now(datetime.timezone.utc)
-        db_session.commit()
-
-        loaded = db_session.query(AreaAlertState).filter_by(area_key="9vuf1").first()
-        assert loaded.alert_active is True
-        assert loaded.last_risk_score == 0.85
-        assert loaded.last_risk_level == "high"
-
-    def test_unique_area_key(self, db_session):
-        """Duplicate area_key should raise IntegrityError."""
-        from sqlalchemy.exc import IntegrityError
-
-        db_session.add(AreaAlertState(area_key="9vuf1", alert_active=False))
-        db_session.flush()
-
-        db_session.add(AreaAlertState(area_key="9vuf1", alert_active=True))
-        with pytest.raises(IntegrityError):
-            db_session.flush()
-        db_session.rollback()
