@@ -73,6 +73,21 @@ def _get_payload_value(payload: Mapping[str, Any], key: str) -> Any:
     return None
 
 
+def _patch_sklearn_compat(bundle: Dict[str, Any]) -> None:
+    """Fix cross-version sklearn attribute renames so older bundles load."""
+    try:
+        from sklearn.impute import SimpleImputer
+        pipeline = bundle.get("base_model")
+        if pipeline is None or not hasattr(pipeline, "steps"):
+            return
+        for _name, step in pipeline.steps:
+            if isinstance(step, SimpleImputer):
+                if hasattr(step, "_fit_dtype") and not hasattr(step, "_fill_dtype"):
+                    step._fill_dtype = step._fit_dtype
+    except Exception:
+        pass
+
+
 def load_model_bundle(model_path: Path) -> Dict[str, Any]:
     bundle = joblib.load(model_path)
     if not isinstance(bundle, dict):
@@ -81,6 +96,7 @@ def load_model_bundle(model_path: Path) -> Dict[str, Any]:
     missing = sorted(REQUIRED_BUNDLE_KEYS - set(bundle.keys()))
     if missing:
         raise KeyError(f"Bundle missing keys {missing}: {model_path}")
+    _patch_sklearn_compat(bundle)
     return bundle
 
 

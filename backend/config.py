@@ -40,3 +40,9 @@ OPEN_METEO_BASE_URL: str = os.getenv(
     "OPEN_METEO_BASE_URL",
     "https://api.open-meteo.com/v1/forecast",
 )
+LOCATION_CHANGE_THRESHOLD_KM: float = float(
+    os.getenv("LOCATION_CHANGE_THRESHOLD_KM", "50")
+)
+
+# ── Area-based prediction ───────────────────────────────────────────
+AREA_CELL_PRECISION: int = int(os.getenv("AREA_CELL_PRECISION", "5"))

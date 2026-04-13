@@ -23,7 +23,7 @@ from firebase_notifications import firebase_service
 import uuid
 import secrets
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 
 # Load environment variables
@@ -50,9 +50,27 @@ SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEg
 
 # ── ML pipeline imports (lib/) ──────────────────────────────────────
 from lib.ml.ml_prediction_service import get_predictor_client, PredictorUnavailableError
-from lib.ml.feature_assembly_service import assemble_live_features, FeatureAssemblyError
+from lib.ml.feature_assembly_service import (
+    assemble_live_features,
+    FeatureAssemblyError,
+    geohash_encode,
+    geohash_decode,
+)
 from lib.ml.live_weather_service import fetch_live_prediction_input, LiveWeatherError
-from database import UserDevice, get_session
+from database import UserDevice, AreaWeatherSnapshot, AreaAlertState, get_session
+
+import threading
+
+# Single-flight lock: ensures only one inference per area_key at a time
+_area_locks: dict[str, threading.Lock] = {}
+_area_locks_guard = threading.Lock()
+
+
+def _get_area_lock(area_key: str) -> threading.Lock:
+    with _area_locks_guard:
+        if area_key not in _area_locks:
+            _area_locks[area_key] = threading.Lock()
+        return _area_locks[area_key]
 
 
 # ============= UTILITY FUNCTIONS =============
@@ -1122,13 +1140,108 @@ class LivePredictionRequest(BaseModel):
     longitude: float | None = None
 
 
+def _run_area_prediction(
+    db,
+    area_key: str,
+    rep_lat: float,
+    rep_lon: float,
+) -> dict:
+    """Core area-level prediction: fetch weather, assemble features, infer.
+
+    Returns the predictor result dict.  The caller is responsible for
+    single-flight locking and session commit/rollback.
+    """
+    # 1. Fetch live weather for area centroid
+    live_input = fetch_live_prediction_input(latitude=rep_lat, longitude=rep_lon)
+
+    # 2. Assemble features (stores snapshot, prunes old rows)
+    weather_data = assemble_live_features(
+        db=db,
+        area_key=area_key,
+        representative_lat=rep_lat,
+        representative_lon=rep_lon,
+        request_data=live_input,
+    )
+
+    # 3. Load / create area alert state
+    area_state = (
+        db.query(AreaAlertState)
+        .filter(AreaAlertState.area_key == area_key)
+        .first()
+    )
+    if area_state is None:
+        area_state = AreaAlertState(area_key=area_key, alert_active=False)
+        db.add(area_state)
+        db.flush()
+
+    alert_context = {
+        "alert_active": area_state.alert_active,
+        "last_alert_start_utc": (
+            area_state.last_alert_start_utc.isoformat()
+            if area_state.last_alert_start_utc
+            else None
+        ),
+        "last_alert_end_utc": (
+            area_state.last_alert_end_utc.isoformat()
+            if area_state.last_alert_end_utc
+            else None
+        ),
+        "cooldown_until_utc": (
+            area_state.cooldown_until_utc.isoformat()
+            if area_state.cooldown_until_utc
+            else None
+        ),
+        "last_observed_storm_utc": (
+            area_state.last_observed_storm_utc.isoformat()
+            if area_state.last_observed_storm_utc
+            else None
+        ),
+    }
+
+    # 4. Run prediction
+    predictor = get_predictor_client()
+    result = predictor.predict(weather_data=weather_data, alert_context=alert_context)
+
+    # 5. Persist updated context back to area_alert_state
+    updated_ctx = result.get("updated_context") or {}
+    now_utc = datetime.now(timezone.utc)
+
+    if "alert_active" in updated_ctx:
+        area_state.alert_active = bool(updated_ctx["alert_active"])
+    if updated_ctx.get("last_alert_start_utc"):
+        area_state.last_alert_start_utc = datetime.fromisoformat(
+            updated_ctx["last_alert_start_utc"].replace("Z", "+00:00")
+        )
+    if updated_ctx.get("last_alert_end_utc"):
+        area_state.last_alert_end_utc = datetime.fromisoformat(
+            updated_ctx["last_alert_end_utc"].replace("Z", "+00:00")
+        )
+    if updated_ctx.get("cooldown_until_utc"):
+        area_state.cooldown_until_utc = datetime.fromisoformat(
+            updated_ctx["cooldown_until_utc"].replace("Z", "+00:00")
+        )
+    if updated_ctx.get("last_observed_storm_utc"):
+        area_state.last_observed_storm_utc = datetime.fromisoformat(
+            updated_ctx["last_observed_storm_utc"].replace("Z", "+00:00")
+        )
+
+    area_state.last_prediction_utc = now_utc
+    area_state.last_risk_score = result.get("risk_score")
+    area_state.last_risk_level = result.get("risk_level")
+    area_state.model_version = result.get("model_version")
+
+    db.flush()
+    return result
+
+
 @app.post("/predict/live")
 async def predict_live(request: LivePredictionRequest):
     """
     End-to-end live prediction:
-    1. Fetch current weather from Open-Meteo for the device's location.
-    2. Assemble the full ML feature vector (with history from the DB).
-    3. Run the prediction through the ML model.
+    1. Resolve device location -> area_key.
+    2. Check for cached prediction this hour.
+    3. If no cache: fetch weather, assemble features, run ML model.
+    4. Return result.
     """
     db = get_session()
     try:
@@ -1137,26 +1250,95 @@ async def predict_live(request: LivePredictionRequest):
         if user is None:
             raise HTTPException(status_code=404, detail="Device not found")
 
-        lat = request.latitude or user.last_lat
-        lon = request.longitude or user.last_lon
+        lat = request.latitude
+        lon = request.longitude
+
+        # Fallback: fetch latest location from device_location table
+        if lat is None or lon is None:
+            async with httpx.AsyncClient(timeout=30) as client:
+                headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+                loc_resp = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/device_location"
+                    f"?device_id=eq.{request.device_id}&order=captured_at.desc&limit=1",
+                    headers=headers,
+                )
+                locs = loc_resp.json() if loc_resp.status_code == 200 else []
+                if locs:
+                    lat = lat or float(locs[0]["latitude"])
+                    lon = lon or float(locs[0]["longitude"])
+
         if lat is None or lon is None:
             raise HTTPException(
                 status_code=400,
                 detail="Location is required (provide latitude/longitude or ensure device has a saved location)",
             )
 
-        # 1. Fetch live weather
-        live_input = fetch_live_prediction_input(latitude=lat, longitude=lon)
+        # Update area_key on device
+        area_key = geohash_encode(lat, lon)
+        user.area_key = area_key
 
-        # 2. Assemble features
-        weather_data = assemble_live_features(db=db, user=user, request_data=live_input)
-        db.commit()
+        # Use cell centroid as representative coordinates
+        rep_lat, rep_lon = geohash_decode(area_key)
 
-        # 3. Predict
-        predictor = get_predictor_client()
-        result = predictor.predict(weather_data=weather_data)
+        # Check for cached prediction this hour
+        now_utc = datetime.now(timezone.utc)
+        current_hour = now_utc.replace(minute=0, second=0, microsecond=0)
 
-        return {"success": True, **result}
+        area_state = (
+            db.query(AreaAlertState)
+            .filter(AreaAlertState.area_key == area_key)
+            .first()
+        )
+
+        if (
+            area_state is not None
+            and area_state.last_prediction_utc is not None
+            and area_state.last_prediction_utc >= current_hour
+        ):
+            # Cache hit — return stored result without re-running inference
+            db.commit()
+            return {
+                "success": True,
+                "cached": True,
+                "area_key": area_key,
+                "risk_score": area_state.last_risk_score,
+                "risk_level": area_state.last_risk_level,
+                "alert_active": area_state.alert_active,
+                "model_version": area_state.model_version,
+                "last_prediction_utc": area_state.last_prediction_utc.isoformat(),
+            }
+
+        # Single-flight: only one inference per area at a time
+        lock = _get_area_lock(area_key)
+        with lock:
+            # Re-check cache after acquiring lock (another thread may have filled it)
+            db.expire_all()
+            area_state = (
+                db.query(AreaAlertState)
+                .filter(AreaAlertState.area_key == area_key)
+                .first()
+            )
+            if (
+                area_state is not None
+                and area_state.last_prediction_utc is not None
+                and area_state.last_prediction_utc >= current_hour
+            ):
+                db.commit()
+                return {
+                    "success": True,
+                    "cached": True,
+                    "area_key": area_key,
+                    "risk_score": area_state.last_risk_score,
+                    "risk_level": area_state.last_risk_level,
+                    "alert_active": area_state.alert_active,
+                    "model_version": area_state.model_version,
+                    "last_prediction_utc": area_state.last_prediction_utc.isoformat(),
+                }
+
+            result = _run_area_prediction(db, area_key, rep_lat, rep_lon)
+            db.commit()
+
+        return {"success": True, "cached": False, "area_key": area_key, **result}
 
     except (LiveWeatherError, FeatureAssemblyError) as e:
         db.rollback()
@@ -1172,6 +1354,176 @@ async def predict_live(request: LivePredictionRequest):
     except Exception as e:
         db.rollback()
         logger.exception("Unexpected error in /predict/live")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+# ============= AREA ENDPOINTS =============
+
+
+@app.get("/areas/{area_key}/prediction")
+async def get_area_prediction(area_key: str):
+    """Return current area prediction state."""
+    db = get_session()
+    try:
+        state = (
+            db.query(AreaAlertState)
+            .filter(AreaAlertState.area_key == area_key)
+            .first()
+        )
+        if state is None:
+            raise HTTPException(status_code=404, detail="No prediction data for this area")
+        return {
+            "area_key": state.area_key,
+            "alert_active": state.alert_active,
+            "last_risk_score": state.last_risk_score,
+            "last_risk_level": state.last_risk_level,
+            "last_prediction_utc": (
+                state.last_prediction_utc.isoformat() if state.last_prediction_utc else None
+            ),
+            "model_version": state.model_version,
+            "cooldown_until_utc": (
+                state.cooldown_until_utc.isoformat() if state.cooldown_until_utc else None
+            ),
+        }
+    finally:
+        db.close()
+
+
+@app.get("/areas/{area_key}/history")
+async def get_area_history(area_key: str, limit: int = 24):
+    """Return recent AreaWeatherSnapshot rows for debugging."""
+    db = get_session()
+    try:
+        from sqlalchemy import desc as sa_desc
+
+        rows = (
+            db.query(AreaWeatherSnapshot)
+            .filter(AreaWeatherSnapshot.area_key == area_key)
+            .order_by(sa_desc(AreaWeatherSnapshot.timestamp))
+            .limit(min(limit, 200))
+            .all()
+        )
+        snapshots = [
+            {
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "temp_c": r.temp_c,
+                "pressure_hPa": r.pressure_hPa,
+                "humidity_pct": r.humidity_pct,
+                "wind_speed_kmh": r.wind_speed_kmh,
+                "precip_mm": r.precip_mm,
+                "representative_lat": r.representative_lat,
+                "representative_lon": r.representative_lon,
+            }
+            for r in reversed(rows)
+        ]
+        return {"area_key": area_key, "count": len(snapshots), "snapshots": snapshots}
+    finally:
+        db.close()
+
+
+@app.post("/notifications/send-ml-alerts")
+async def send_ml_alerts():
+    """Fan out notifications to users in areas with active ML alerts."""
+    db = get_session()
+    try:
+        active_areas = (
+            db.query(AreaAlertState)
+            .filter(AreaAlertState.alert_active == True)  # noqa: E712
+            .all()
+        )
+
+        total_sent = 0
+        total_skipped = 0
+        area_results = []
+
+        now_utc = datetime.now(timezone.utc)
+
+        for area in active_areas:
+            # Find all devices in this area with a valid FCM token
+            devices = (
+                db.query(UserDevice)
+                .filter(
+                    UserDevice.area_key == area.area_key,
+                )
+                .all()
+            )
+
+            eligible_tokens: list[str] = []
+            for dev in devices:
+                # Check device_token exists via Supabase REST or column
+                # Here we check notification cooldown
+                if (
+                    dev.notification_cooldown_until_utc is not None
+                    and dev.notification_cooldown_until_utc > now_utc
+                ):
+                    total_skipped += 1
+                    continue
+                eligible_tokens.append(dev.id)
+
+            if not eligible_tokens:
+                area_results.append(
+                    {"area_key": area.area_key, "sent": 0, "skipped": len(devices)}
+                )
+                continue
+
+            # Fetch device tokens from Supabase for eligible device_ids
+            async with httpx.AsyncClient(timeout=30) as client:
+                headers = {
+                    "apikey": SUPABASE_API_KEY,
+                    "Content-Type": "application/json",
+                }
+                resp = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/device"
+                    f"?device_id=in.({','.join(eligible_tokens)})"
+                    f"&device_token=not.is.null"
+                    f"&select=device_id,device_token",
+                    headers=headers,
+                )
+                token_rows = resp.json() if resp.status_code == 200 else []
+
+            fcm_tokens = [r["device_token"] for r in token_rows if r.get("device_token")]
+
+            if fcm_tokens:
+                risk = area.last_risk_level or "elevated"
+                result = firebase_service.send_multicast_notification(
+                    device_tokens=fcm_tokens,
+                    title=f"Weather Alert — {risk.title()} Risk",
+                    body=f"Severe weather risk detected in your area (cell {area.area_key}).",
+                    data={
+                        "type": "ml_alert",
+                        "area_key": area.area_key,
+                        "risk_level": risk,
+                        "risk_score": str(area.last_risk_score or ""),
+                    },
+                )
+                sent = result.get("success", 0)
+            else:
+                sent = 0
+
+            # Update notification cooldown on devices
+            cooldown_until = now_utc + timedelta(hours=1)
+            for dev in devices:
+                dev.last_notified_utc = now_utc
+                dev.notification_cooldown_until_utc = cooldown_until
+
+            total_sent += sent
+            area_results.append(
+                {"area_key": area.area_key, "sent": sent, "eligible": len(fcm_tokens)}
+            )
+
+        db.commit()
+        return {
+            "success": True,
+            "areas_processed": len(active_areas),
+            "total_sent": total_sent,
+            "total_skipped": total_skipped,
+            "details": area_results,
+        }
+    except Exception as e:
+        db.rollback()
+        logger.exception("Error sending ML alerts")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()

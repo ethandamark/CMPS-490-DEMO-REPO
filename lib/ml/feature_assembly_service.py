@@ -1,18 +1,98 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import math
 from typing import Any, Dict, Iterable, List
 
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from database import UserDevice, DeviceWeatherSnapshot
+from config import AREA_CELL_PRECISION
+from database import AreaWeatherSnapshot
+
+
+logger = logging.getLogger(__name__)
 
 
 class FeatureAssemblyError(ValueError):
     """Raised when the backend cannot build a valid model feature payload."""
 
+
+# ── Geohash implementation ──────────────────────────────────────────
+# Lightweight base-32 geohash so we don't need a third-party package.
+
+_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+
+def geohash_encode(latitude: float, longitude: float, precision: int | None = None) -> str:
+    """Return a geohash string for *latitude* / *longitude*.
+
+    ``precision`` defaults to ``AREA_CELL_PRECISION`` from config.
+    """
+    if precision is None:
+        precision = AREA_CELL_PRECISION
+
+    lat_range = (-90.0, 90.0)
+    lon_range = (-180.0, 180.0)
+    bits = [16, 8, 4, 2, 1]
+    hash_chars: list[str] = []
+    is_lon = True
+    bit_idx = 0
+    char_val = 0
+
+    while len(hash_chars) < precision:
+        if is_lon:
+            mid = (lon_range[0] + lon_range[1]) / 2.0
+            if longitude >= mid:
+                char_val |= bits[bit_idx]
+                lon_range = (mid, lon_range[1])
+            else:
+                lon_range = (lon_range[0], mid)
+        else:
+            mid = (lat_range[0] + lat_range[1]) / 2.0
+            if latitude >= mid:
+                char_val |= bits[bit_idx]
+                lat_range = (mid, lat_range[1])
+            else:
+                lat_range = (lat_range[0], mid)
+        is_lon = not is_lon
+        bit_idx += 1
+        if bit_idx == 5:
+            hash_chars.append(_BASE32[char_val])
+            bit_idx = 0
+            char_val = 0
+
+    return "".join(hash_chars)
+
+
+def geohash_decode(ghash: str) -> tuple[float, float]:
+    """Return the (latitude, longitude) centroid of a geohash cell."""
+    lat_range = [-90.0, 90.0]
+    lon_range = [-180.0, 180.0]
+    is_lon = True
+
+    for ch in ghash:
+        val = _BASE32.index(ch)
+        for bit in [16, 8, 4, 2, 1]:
+            if is_lon:
+                mid = (lon_range[0] + lon_range[1]) / 2.0
+                if val & bit:
+                    lon_range[0] = mid
+                else:
+                    lon_range[1] = mid
+            else:
+                mid = (lat_range[0] + lat_range[1]) / 2.0
+                if val & bit:
+                    lat_range[0] = mid
+                else:
+                    lat_range[1] = mid
+            is_lon = not is_lon
+
+    return (lat_range[0] + lat_range[1]) / 2.0, (lon_range[0] + lon_range[1]) / 2.0
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
@@ -79,7 +159,7 @@ def _safe_max(values: Iterable[float | None]) -> float | None:
     return max(filtered) if filtered else None
 
 
-def _to_record(snapshot: DeviceWeatherSnapshot) -> Dict[str, Any]:
+def _to_record(snapshot: AreaWeatherSnapshot) -> Dict[str, Any]:
     dew_point = _coerce_float(snapshot.dew_point_c)
     temp_c = _coerce_float(snapshot.temp_c)
     if dew_point is None and temp_c is not None:
@@ -93,10 +173,9 @@ def _to_record(snapshot: DeviceWeatherSnapshot) -> Dict[str, Any]:
         "humidity_pct": _coerce_float(snapshot.humidity_pct),
         "wind_speed_kmh": _coerce_float(snapshot.wind_speed_kmh),
         "precip_mm": _coerce_float(snapshot.precip_mm),
-        "latitude": _coerce_float(snapshot.latitude),
-        "longitude": _coerce_float(snapshot.longitude),
+        "latitude": _coerce_float(snapshot.representative_lat),
+        "longitude": _coerce_float(snapshot.representative_lon),
         "elevation": _coerce_float(snapshot.elevation),
-        "dist_to_coast_km": _coerce_float(snapshot.dist_to_coast_km),
         "nwp_cape_f3_6_max": _coerce_float(snapshot.nwp_cape_f3_6_max),
         "nwp_cin_f3_6_max": _coerce_float(snapshot.nwp_cin_f3_6_max),
         "nwp_pwat_f3_6_max": _coerce_float(snapshot.nwp_pwat_f3_6_max),
@@ -108,30 +187,42 @@ def _to_record(snapshot: DeviceWeatherSnapshot) -> Dict[str, Any]:
     }
 
 
+# ── Public API ──────────────────────────────────────────────────────
+
 def assemble_live_features(
     db: Session,
-    user: UserDevice,
+    area_key: str,
+    representative_lat: float,
+    representative_lon: float,
     request_data: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Build the full ML feature vector for an area cell.
+
+    Parameters
+    ----------
+    db : Session
+        Active SQLAlchemy session.
+    area_key : str
+        Geohash key for the area.
+    representative_lat, representative_lon : float
+        Cell centroid coordinates (used for static feature calculations).
+    request_data : dict
+        Output of ``fetch_live_prediction_input()`` (current observation,
+        static features, NWP, radar, etc.).
+
+    Returns
+    -------
+    dict
+        Feature vector ready for the ML predictor.
+    """
     valid_time = _parse_valid_time(request_data["valid_time_utc"])
     obs = request_data.get("current_observation") or {}
     static = request_data.get("static_features") or {}
     nwp = request_data.get("nwp_features") or {}
     radar = request_data.get("radar_features") or {}
 
-    latitude = _coerce_float(request_data.get("latitude"))
-    longitude = _coerce_float(request_data.get("longitude"))
-    if latitude is None:
-        latitude = _coerce_float(user.last_lat)
-    if longitude is None:
-        longitude = _coerce_float(user.last_lon)
-    if latitude is None or longitude is None:
-        raise FeatureAssemblyError("latitude and longitude are required on the first live prediction call.")
-
-    if request_data.get("latitude") is not None:
-        user.last_lat = latitude
-    if request_data.get("longitude") is not None:
-        user.last_lon = longitude
+    latitude = representative_lat
+    longitude = representative_lon
 
     temp_c = _coerce_float(obs.get("temp_c"))
     dew_point_c = _coerce_float(obs.get("dew_point_c"))
@@ -145,26 +236,33 @@ def assemble_live_features(
     if dist_to_coast_km is None:
         dist_to_coast_km = _distance_to_gulf_coast(latitude, longitude)
 
+    # ── Prune snapshots older than 48 hours ─────────────────────────
+    cutoff = valid_time - datetime.timedelta(hours=48)
+    db.query(AreaWeatherSnapshot).filter(
+        AreaWeatherSnapshot.area_key == area_key,
+        AreaWeatherSnapshot.timestamp < cutoff,
+    ).delete(synchronize_session="fetch")
+
+    # ── Upsert current hour's snapshot ──────────────────────────────
     existing = (
-        db.query(DeviceWeatherSnapshot)
+        db.query(AreaWeatherSnapshot)
         .filter(
-            DeviceWeatherSnapshot.user_id == user.id,
-            DeviceWeatherSnapshot.timestamp == valid_time,
+            AreaWeatherSnapshot.area_key == area_key,
+            AreaWeatherSnapshot.timestamp == valid_time,
         )
         .first()
     )
 
-    snapshot = existing or DeviceWeatherSnapshot(user_id=user.id, timestamp=valid_time)
+    snapshot = existing or AreaWeatherSnapshot(area_key=area_key, timestamp=valid_time)
+    snapshot.representative_lat = latitude
+    snapshot.representative_lon = longitude
     snapshot.temp_c = temp_c
     snapshot.dew_point_c = dew_point_c
     snapshot.pressure_hPa = _coerce_float(obs.get("pressure_hPa"))
     snapshot.humidity_pct = _coerce_float(obs.get("humidity_pct"))
     snapshot.wind_speed_kmh = _coerce_float(obs.get("wind_speed_kmh"))
     snapshot.precip_mm = _coerce_float(obs.get("precip_mm"))
-    snapshot.latitude = latitude
-    snapshot.longitude = longitude
     snapshot.elevation = _coerce_float(static.get("elevation"))
-    snapshot.dist_to_coast_km = dist_to_coast_km
     snapshot.nwp_cape_f3_6_max = _coerce_float(nwp.get("nwp_cape_f3_6_max"))
     snapshot.nwp_cin_f3_6_max = _coerce_float(nwp.get("nwp_cin_f3_6_max"))
     snapshot.nwp_pwat_f3_6_max = _coerce_float(nwp.get("nwp_pwat_f3_6_max"))
@@ -178,13 +276,14 @@ def assemble_live_features(
         db.add(snapshot)
     db.flush()
 
+    # ── Build history window (last 24 hours) ────────────────────────
     history_rows = (
-        db.query(DeviceWeatherSnapshot)
+        db.query(AreaWeatherSnapshot)
         .filter(
-            DeviceWeatherSnapshot.user_id == user.id,
-            DeviceWeatherSnapshot.timestamp <= valid_time,
+            AreaWeatherSnapshot.area_key == area_key,
+            AreaWeatherSnapshot.timestamp <= valid_time,
         )
-        .order_by(desc(DeviceWeatherSnapshot.timestamp))
+        .order_by(desc(AreaWeatherSnapshot.timestamp))
         .limit(24)
         .all()
     )
@@ -233,7 +332,7 @@ def assemble_live_features(
         "latitude": latitude,
         "longitude": longitude,
         "elevation": current["elevation"],
-        "dist_to_coast_km": current["dist_to_coast_km"],
+        "dist_to_coast_km": dist_to_coast_km,
         "nwp_cape_f3_6_max": current["nwp_cape_f3_6_max"],
         "nwp_cin_f3_6_max": current["nwp_cin_f3_6_max"],
         "nwp_pwat_f3_6_max": current["nwp_pwat_f3_6_max"],
