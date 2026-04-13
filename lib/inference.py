@@ -85,7 +85,14 @@ def load_model_bundle(model_path: Path) -> Dict[str, Any]:
 
 
 def discover_latest_model() -> Optional[Path]:
-    candidates = list(Path("artifacts/severe_pipeline").glob("**/*_model.joblib"))
+    search_dirs = [
+        Path(__file__).resolve().parent / "models",        # lib/models/
+        Path("artifacts/severe_pipeline"),                   # legacy relative path
+    ]
+    candidates: list[Path] = []
+    for d in search_dirs:
+        if d.is_dir():
+            candidates.extend(d.glob("**/*.joblib"))
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
