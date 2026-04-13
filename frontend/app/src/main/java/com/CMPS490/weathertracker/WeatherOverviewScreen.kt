@@ -37,7 +37,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.CMPS490.weathertracker.ui.theme.AppThemeMode
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
+import com.CMPS490.weathertracker.ui.theme.WeatherTrackerThemeState
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MapStyleOptions
@@ -48,16 +50,7 @@ import com.google.maps.android.compose.*
 import java.net.URL
 import java.util.concurrent.atomic.AtomicReference
 
-// Custom Colors based on Mockup
-val NavyDark = Color(0xFF0A1931)
-val NavyLight = Color(0xFF185ABD)
-val CardBackground = Color(0xFF1E2A44).copy(alpha = 0.7f)
-val AlertGold = Color(0xFFFFD700)
-val MutedText = Color(0xFF9EADC8)
-private val SunGlow = Color(0xFFFFE082)
-private val RainTint = Color(0xFF8AC6FF)
-private val StormFlash = Color(0xFFFFF3B0)
-private val MistTint = Color(0x66F4F7FB)
+private val AlertGold = Color(0xFFFFD700)
 
 @Composable
 fun WeatherOverviewScreen(
@@ -65,11 +58,14 @@ fun WeatherOverviewScreen(
     alert: WeatherAlertUiModel?,
     forecast: List<DailyForecastUiModel>,
     userLocation: LatLng?,
+    themeMode: AppThemeMode,
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
+    onThemeModeChanged: (AppThemeMode) -> Unit,
     onLocationSelected: (LocationOptionUiModel) -> Unit,
     onLiveRadarClick: () -> Unit
 ) {
+    val palette = WeatherTrackerThemeState.palette
     Box(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -83,8 +79,10 @@ fun WeatherOverviewScreen(
         ) {
             item {
                 LocationSelectorCard(
+                    themeMode = themeMode,
                     locationOptions = locationOptions,
                     selectedLocationOption = selectedLocationOption,
+                    onThemeModeChanged = onThemeModeChanged,
                     onLocationSelected = onLocationSelected
                 )
             }
@@ -107,7 +105,7 @@ fun WeatherOverviewScreen(
                 Text(
                     text = "7-DAY FORECAST",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MutedText,
+                    color = palette.mutedText,
                     letterSpacing = 1.5.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -126,6 +124,8 @@ fun WeatherOverviewScreen(
 
 @Composable
 private fun WeatherDynamicBackground(weather: CurrentWeatherUiModel) {
+    val palette = WeatherTrackerThemeState.palette
+    val isHighContrast = WeatherTrackerThemeState.mode == AppThemeMode.HighContrast
     val transition = rememberInfiniteTransition(label = "weather_scene")
     val cloudShift by transition.animateFloat(
         initialValue = 0f,
@@ -165,23 +165,25 @@ private fun WeatherDynamicBackground(weather: CurrentWeatherUiModel) {
     )
 
     val topColor = when {
+        isHighContrast -> palette.backgroundTopNight
         weather.isDaytime && weather.weatherType == WeatherType.Stormy -> Color(0xFF324057)
         weather.isDaytime && weather.weatherType == WeatherType.Rainy -> Color(0xFF466887)
         weather.isDaytime && weather.weatherType == WeatherType.Cloudy -> Color(0xFF5B6E8A)
-        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> Color(0xFF83CFFF)
+        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> palette.backgroundTopDay
         weather.isDaytime -> Color(0xFF6DAEEA)
         weather.weatherType == WeatherType.Stormy -> Color(0xFF0D142A)
         weather.weatherType == WeatherType.Rainy -> Color(0xFF11233E)
         weather.weatherType == WeatherType.Cloudy -> Color(0xFF182744)
-        else -> Color(0xFF091225)
+        else -> palette.backgroundTopNight
     }
     val bottomColor = when {
-        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> Color(0xFFF7C65A)
+        isHighContrast -> palette.backgroundBottomNight
+        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> palette.backgroundBottomDay
         weather.isDaytime && weather.weatherType == WeatherType.PartlyCloudy -> Color(0xFF3D74C7)
         weather.isDaytime -> Color(0xFF234F9E)
         weather.weatherType == WeatherType.Rainy -> Color(0xFF163A69)
         weather.weatherType == WeatherType.Stormy -> Color(0xFF0F1A35)
-        else -> Color(0xFF122B59)
+        else -> palette.backgroundBottomNight
     }
 
     Box(
@@ -218,12 +220,13 @@ private fun WeatherDynamicBackground(weather: CurrentWeatherUiModel) {
 
 @Composable
 private fun AtmosphericWash(weather: CurrentWeatherUiModel, hazeShift: Float) {
+    val palette = WeatherTrackerThemeState.palette
     Canvas(modifier = Modifier.fillMaxSize()) {
         val warmHorizon = if (weather.isDaytime) Color(0x55FFDDA1) else Color(0x220F234A)
         val coolMist = when (weather.weatherType) {
             WeatherType.Rainy -> Color(0x334E6D8A)
             WeatherType.Stormy -> Color(0x22465A74)
-            else -> MistTint
+            else -> palette.mistTint
         }
         drawRect(
             brush = Brush.verticalGradient(
@@ -249,7 +252,8 @@ private fun AtmosphericWash(weather: CurrentWeatherUiModel, hazeShift: Float) {
 
 @Composable
 private fun DaylightOrb(weather: CurrentWeatherUiModel) {
-    val orbColor = if (weather.weatherType == WeatherType.Sunny) SunGlow else Color(0xFFFFF4D8)
+    val palette = WeatherTrackerThemeState.palette
+    val orbColor = if (weather.weatherType == WeatherType.Sunny) palette.sunGlow else Color(0xFFFFF4D8)
     Canvas(modifier = Modifier.fillMaxSize()) {
         val center = Offset(size.width * 0.16f, size.height * 0.14f)
         drawCircle(
@@ -320,7 +324,9 @@ private fun CloudLayer(
     cloudShift: Float,
     modifier: Modifier = Modifier
 ) {
+    val mode = WeatherTrackerThemeState.mode
     val cloudColor = when {
+        mode == AppThemeMode.HighContrast -> Color.White.copy(alpha = 0.22f)
         weather.weatherType == WeatherType.Stormy -> Color(0xAA3B4B5E)
         weather.weatherType == WeatherType.Rainy -> Color(0x885D738B)
         weather.isDaytime -> Color(0x66F3F6FA)
@@ -365,6 +371,7 @@ private fun RainLayer(
     rainOffset: Float,
     modifier: Modifier = Modifier
 ) {
+    val palette = WeatherTrackerThemeState.palette
     Canvas(modifier = modifier) {
         val columns = 20
         val streakLength = size.height * 0.08f
@@ -374,7 +381,7 @@ private fun RainLayer(
             val progress = ((rainOffset + laneOffset) % 1f)
             val yStart = progress * (size.height + streakLength) - streakLength
             drawLine(
-                color = RainTint.copy(alpha = 0.14f + (0.22f * intensity)),
+                color = palette.rainTint.copy(alpha = 0.14f + (0.22f * intensity)),
                 start = Offset(x, yStart),
                 end = Offset(x - 16f, yStart + streakLength),
                 strokeWidth = if (index % 3 == 0) 2.6f else 1.6f,
@@ -386,6 +393,7 @@ private fun RainLayer(
 
 @Composable
 private fun LightningAccent(modifier: Modifier = Modifier) {
+    val palette = WeatherTrackerThemeState.palette
     Canvas(modifier = modifier) {
         val path = Path().apply {
             moveTo(size.width * 0.82f, size.height * 0.16f)
@@ -396,16 +404,17 @@ private fun LightningAccent(modifier: Modifier = Modifier) {
             lineTo(size.width * 0.74f, size.height * 0.33f)
             close()
         }
-        drawPath(color = StormFlash.copy(alpha = 0.14f), path = path)
+        drawPath(color = palette.stormFlash.copy(alpha = 0.14f), path = path)
     }
 }
 
 @Composable
 fun RadarAttributionFooter() {
+    val palette = WeatherTrackerThemeState.palette
     Text(
         text = "Radar data source: Rain Viewer API",
         style = MaterialTheme.typography.labelSmall,
-        color = MutedText,
+        color = palette.mutedText,
         textAlign = TextAlign.Center,
         modifier = Modifier
             .fillMaxWidth()
@@ -415,14 +424,17 @@ fun RadarAttributionFooter() {
 
 @Composable
 fun LocationSelectorCard(
+    themeMode: AppThemeMode,
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
+    onThemeModeChanged: (AppThemeMode) -> Unit,
     onLocationSelected: (LocationOptionUiModel) -> Unit
 ) {
+    val palette = WeatherTrackerThemeState.palette
     var expanded by remember { mutableStateOf(false) }
 
     Surface(
-        color = CardBackground,
+        color = palette.locationCardBackground,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -430,7 +442,7 @@ fun LocationSelectorCard(
             Text(
                 text = "Location Source",
                 style = MaterialTheme.typography.labelMedium,
-                color = MutedText,
+                color = palette.mutedText,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.2.sp
             )
@@ -438,7 +450,12 @@ fun LocationSelectorCard(
             Box {
                 OutlinedButton(
                     onClick = { expanded = true },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = palette.selectorBackground,
+                        contentColor = palette.selectorContent
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, palette.outline)
                 ) {
                     Text(text = selectedLocationOption.label)
                 }
@@ -458,46 +475,76 @@ fun LocationSelectorCard(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Theme",
+                style = MaterialTheme.typography.labelMedium,
+                color = palette.mutedText,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.2.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AppThemeMode.entries.forEach { option ->
+                    FilterChip(
+                        selected = themeMode == option,
+                        onClick = { onThemeModeChanged(option) },
+                        label = { Text(option.label()) },
+                        modifier = Modifier.weight(1f),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                            containerColor = palette.selectorBackground,
+                            labelColor = palette.selectorContent
+                        )
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
 fun WeatherHeaderSection(weather: CurrentWeatherUiModel) {
+    val palette = WeatherTrackerThemeState.palette
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         Text(
             text = weather.location,
             style = MaterialTheme.typography.headlineSmall,
-            color = Color.White,
+            color = palette.primaryText,
             fontWeight = FontWeight.Bold
         )
         Text(
             text = weather.dayDate,
             style = MaterialTheme.typography.bodyMedium,
-            color = MutedText
+            color = palette.mutedText
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "${weather.temperature}°",
             style = MaterialTheme.typography.displayLarge.copy(fontSize = 100.sp),
-            color = Color.White,
+            color = palette.primaryText,
             fontWeight = FontWeight.Thin
         )
         Text(
             text = weather.condition,
             style = MaterialTheme.typography.titleLarge,
-            color = Color.White
+            color = palette.primaryText
         )
         Text(
             text = "H:${weather.highTemp}° L:${weather.lowTemp}°",
             style = MaterialTheme.typography.bodyLarge,
-            color = Color.White
+            color = palette.primaryText
         )
     }
 }
 
 @Composable
 fun WeatherAlertCard(alert: WeatherAlertUiModel) {
+    val palette = WeatherTrackerThemeState.palette
     var expanded by remember { mutableStateOf(false) }
     val isWarning = alert.title.contains("warning", ignoreCase = true)
     val isWatch = alert.title.contains("watch", ignoreCase = true)
@@ -513,7 +560,7 @@ fun WeatherAlertCard(alert: WeatherAlertUiModel) {
         isWarning -> Color(0xFF5A1E26).copy(alpha = 0.72f)
         isWatch -> Color(0xFF5A3A1A).copy(alpha = 0.72f)
         isAdvisory -> Color(0xFF5B4B1A).copy(alpha = 0.72f)
-        else -> CardBackground
+        else -> palette.cardBackground
     }
     val detailTextColor = Color(0xFFF8FAFF)
     val subtitleColor = Color(0xFFE3E8F5)
@@ -569,6 +616,7 @@ fun WeatherAlertCard(alert: WeatherAlertUiModel) {
 
 @Composable
 fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
+    val palette = WeatherTrackerThemeState.palette
     val context = androidx.compose.ui.platform.LocalContext.current
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(userLocation ?: LatLng(30.2241, -92.0198), 10f)
@@ -614,7 +662,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
     }
 
     Surface(
-        color = CardBackground,
+        color = palette.cardBackground,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -687,7 +735,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                colors = listOf(NavyDark, CardBackground)
+                                colors = listOf(palette.backgroundTopNight, palette.cardBackground)
                             )
                         )
                 )
@@ -699,7 +747,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.5f))
+                            colors = listOf(Color.Transparent, palette.radarOverlayBottom)
                         )
                     )
                     .clickable { onClick() }
@@ -712,13 +760,13 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
             ) {
                 Text(
                     text = "Live Radar",
-                    color = Color.White,
+                    color = palette.primaryText,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = "Tap to expand",
-                    color = MutedText,
+                    color = palette.mutedText,
                     style = MaterialTheme.typography.labelSmall
                 )
             }
@@ -726,7 +774,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
             Icon(
                 imageVector = Icons.Rounded.OpenInFull,
                 contentDescription = null,
-                tint = Color.White,
+                tint = palette.primaryText,
                 modifier = Modifier
                     .padding(16.dp)
                     .align(Alignment.TopEnd)
@@ -738,6 +786,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
 
 @Composable
 fun ForecastRow(day: DailyForecastUiModel) {
+    val palette = WeatherTrackerThemeState.palette
     var expanded by remember { mutableStateOf(false) }
 
     Column(
@@ -746,7 +795,7 @@ fun ForecastRow(day: DailyForecastUiModel) {
             .animateContentSize()
     ) {
         Surface(
-            color = if (day.isToday) CardBackground else Color.Transparent,
+            color = if (day.isToday) palette.cardBackground else Color.Transparent,
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -761,10 +810,10 @@ fun ForecastRow(day: DailyForecastUiModel) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = day.dayLabel,
-                        color = Color.White,
+                        color = palette.primaryText,
                         fontWeight = if (day.isToday) FontWeight.Bold else FontWeight.Medium
                     )
-                    Text(text = day.dateLabel, color = MutedText, style = MaterialTheme.typography.bodySmall)
+                    Text(text = day.dateLabel, color = palette.mutedText, style = MaterialTheme.typography.bodySmall)
                 }
                 
                 Row(
@@ -782,7 +831,7 @@ fun ForecastRow(day: DailyForecastUiModel) {
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "${day.precipitationChance}%",
-                            color = Color(0xFF64B5F6),
+                            color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -793,9 +842,9 @@ fun ForecastRow(day: DailyForecastUiModel) {
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(text = "${day.highTemp}°", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(text = "${day.highTemp}°", color = palette.primaryText, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "${day.lowTemp}°", color = MutedText)
+                    Text(text = "${day.lowTemp}°", color = palette.mutedText)
                 }
             }
         }
@@ -808,8 +857,9 @@ fun ForecastRow(day: DailyForecastUiModel) {
 
 @Composable
 fun ForecastDayExpandedDetails(day: DailyForecastUiModel) {
+    val palette = WeatherTrackerThemeState.palette
     Surface(
-        color = CardBackground.copy(alpha = 0.4f),
+        color = palette.cardBackground.copy(alpha = 0.72f),
         shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -817,15 +867,9 @@ fun ForecastDayExpandedDetails(day: DailyForecastUiModel) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth()) {
-                DetailItem(label = "UV Index", value = day.uvIndex, modifier = Modifier.weight(1f))
-                DetailItem(label = "Humidity", value = "${day.humidity}%", modifier = Modifier.weight(1f))
                 DetailItem(label = "Wind", value = day.windText, modifier = Modifier.weight(1f))
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth()) {
+                Spacer(modifier = Modifier.width(12.dp))
                 DetailItem(label = "Feels Like", value = "${day.feelsLike}°", modifier = Modifier.weight(1f))
-                DetailItem(label = "Sunrise", value = day.sunrise, modifier = Modifier.weight(1f))
-                DetailItem(label = "Sunset", value = day.sunset, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -833,10 +877,17 @@ fun ForecastDayExpandedDetails(day: DailyForecastUiModel) {
 
 @Composable
 fun DetailItem(label: String, value: String, modifier: Modifier = Modifier) {
+    val palette = WeatherTrackerThemeState.palette
     Column(modifier = modifier) {
-        Text(text = label, color = MutedText, style = MaterialTheme.typography.labelSmall)
-        Text(text = value, color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        Text(text = label, color = palette.mutedText, style = MaterialTheme.typography.labelSmall)
+        Text(text = value, color = palette.primaryText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
     }
+}
+
+private fun AppThemeMode.label(): String = when (this) {
+    AppThemeMode.Light -> "Light"
+    AppThemeMode.Dark -> "Dark"
+    AppThemeMode.HighContrast -> "Contrast"
 }
 
 private fun getWeatherIcon(type: WeatherType): ImageVector {
@@ -879,12 +930,14 @@ fun PreviewWeatherOverview() {
             alert = mockAlert,
             forecast = mockForecast,
             userLocation = LatLng(30.2241, -92.0198),
+            themeMode = AppThemeMode.Dark,
             locationOptions = listOf(
                 LocationOptionUiModel("Use device location", null, null, true),
                 LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
                 LocationOptionUiModel("Lafayette, LA", 30.2241, -92.0198)
             ),
             selectedLocationOption = LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
+            onThemeModeChanged = {},
             onLocationSelected = {},
             onLiveRadarClick = {}
         )

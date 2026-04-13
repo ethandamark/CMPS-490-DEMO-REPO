@@ -34,6 +34,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -44,6 +45,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
+import com.CMPS490.weathertracker.ui.theme.AppThemeMode
 import com.CMPS490.weathertracker.network.AlertFeature
 import com.CMPS490.weathertracker.network.AlertsResponse
 import com.CMPS490.weathertracker.network.ForecastPeriod
@@ -126,7 +128,8 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            WeatherTrackerTheme {
+            var themeMode by rememberSaveable { mutableStateOf(AppThemeMode.Dark) }
+            WeatherTrackerTheme(themeMode = themeMode) {
                 val navController = rememberNavController()
                 val context = LocalContext.current
                 val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -407,8 +410,10 @@ class MainActivity : ComponentActivity() {
                             alert = alertWeather,
                             forecast = forecastWeather,
                             userLocation = mapLocation,
+                            themeMode = themeMode,
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
+                            onThemeModeChanged = { themeMode = it },
                             onLocationSelected = { selectedLocationOption = it },
                             onLiveRadarClick = { navController.navigate("map_screen") }
                         )
