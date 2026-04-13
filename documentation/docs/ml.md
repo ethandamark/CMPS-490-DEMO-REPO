@@ -4,3 +4,5 @@ Test Commands:
         python -m pytest tests/test_prediction_model.py -v -s
     Area:
         python -m pytest tests/test_area_predictions.py -v
+    Live Integration (Supabase + real weather):
+        python -m pytest tests/test_live_integration.py -v -s
