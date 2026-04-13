@@ -8,7 +8,11 @@ local.properties
 .cxx/
 *.iml
 backend/__pycache__/
+lib/__pycache__/
+lib/**/__pycache__/
 
 # Python virtual environment
 backend/venv/
 backend/.venv/
+venv/
+.venv/

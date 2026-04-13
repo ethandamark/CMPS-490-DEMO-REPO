@@ -1,6 +1,17 @@
 ﻿"""
 FastAPI backend for Weather Tracker ML predictions + API Proxy
 """
+import sys
+from pathlib import Path
+
+# Add the project root so ``lib`` is importable, and backend/ so
+# lib modules can resolve ``from config import ...`` / ``from database import ...``.
+_BACKEND_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_DIR.parent
+for _p in (_BACKEND_DIR, _PROJECT_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,9 +24,12 @@ import uuid
 import secrets
 import string
 from datetime import datetime, timezone
+import logging
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Weather Tracker API", version="1.0.0")
 
@@ -34,9 +48,11 @@ RAINVIEWER_API_BASE = "https://api.rainviewer.com"
 SUPABASE_BASE = os.getenv("SUPABASE_BASE_URL", "http://localhost:54321")
 SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
 
-# TODO: Import and load your ML prediction model here
-# from models.predictor import WeatherPredictor
-# predictor = WeatherPredictor()
+# ── ML pipeline imports (lib/) ──────────────────────────────────────
+from lib.ml.ml_prediction_service import get_predictor_client, PredictorUnavailableError
+from lib.ml.feature_assembly_service import assemble_live_features, FeatureAssemblyError
+from lib.ml.live_weather_service import fetch_live_prediction_input, LiveWeatherError
+from database import UserDevice, get_session
 
 
 # ============= UTILITY FUNCTIONS =============
@@ -1096,21 +1112,89 @@ async def update_current_device_location(request: CreateDeviceLocationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============= ML PREDICTION ENDPOINT =============
+# ============= ML PREDICTION ENDPOINTS =============
 
-@app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest):
+
+class LivePredictionRequest(BaseModel):
+    """Request a prediction using the device's current location."""
+    device_id: str
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@app.post("/predict/live")
+async def predict_live(request: LivePredictionRequest):
     """
-    Prediction endpoint for ML model.
-    Expected JSON payload should match your model's input requirements.
+    End-to-end live prediction:
+    1. Fetch current weather from Open-Meteo for the device's location.
+    2. Assemble the full ML feature vector (with history from the DB).
+    3. Run the prediction through the ML model.
     """
+    db = get_session()
     try:
-        # TODO: Process input data and call your ML model
-        # prediction = predictor.predict(request.dict())
-        # return {"prediction": prediction}
-        return {"prediction": "ML model not yet integrated"}
+        # Resolve device
+        user = db.query(UserDevice).filter(UserDevice.id == request.device_id).first()
+        if user is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        lat = request.latitude or user.last_lat
+        lon = request.longitude or user.last_lon
+        if lat is None or lon is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Location is required (provide latitude/longitude or ensure device has a saved location)",
+            )
+
+        # 1. Fetch live weather
+        live_input = fetch_live_prediction_input(latitude=lat, longitude=lon)
+
+        # 2. Assemble features
+        weather_data = assemble_live_features(db=db, user=user, request_data=live_input)
+        db.commit()
+
+        # 3. Predict
+        predictor = get_predictor_client()
+        result = predictor.predict(weather_data=weather_data)
+
+        return {"success": True, **result}
+
+    except (LiveWeatherError, FeatureAssemblyError) as e:
+        db.rollback()
+        logger.error("Prediction input error: %s", e)
+        raise HTTPException(status_code=422, detail=str(e))
+    except PredictorUnavailableError as e:
+        db.rollback()
+        logger.error("ML predictor unavailable: %s", e)
+        raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
-        return {"prediction": f"Error: {str(e)}"}
+        db.rollback()
+        logger.exception("Unexpected error in /predict/live")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/predict/health")
+async def predict_health():
+    """Health check for the ML predictor (local or remote)."""
+    try:
+        predictor = get_predictor_client()
+        return predictor.health()
+    except PredictorUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/predict/metadata")
+async def predict_metadata():
+    """Return model metadata: feature columns, target definitions, etc."""
+    try:
+        predictor = get_predictor_client()
+        return predictor.metadata()
+    except PredictorUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 if __name__ == '__main__':
@@ -1118,4 +1202,3 @@ if __name__ == '__main__':
     reload = os.getenv('DEBUG', 'False') == 'True'
     # Use 0.0.0.0 to accept connections from Android emulator (10.0.2.2)
     uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
-from datetime import datetime
