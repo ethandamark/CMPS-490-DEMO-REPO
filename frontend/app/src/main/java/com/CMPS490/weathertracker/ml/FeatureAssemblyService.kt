@@ -34,6 +34,13 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
 
         private const val DEG_PER_KM = 0.009   // ~1 km in degrees (for bounding box)
         private const val HISTORY_RADIUS_KM = 50.0
+
+        /**
+         * Fallback dew point offset when actual dew point data is unavailable.
+         * A 5 °C spread corresponds to roughly 70 % relative humidity — a reasonable
+         * default for humid Gulf Coast conditions when no better data is available.
+         */
+        private const val DEWPOINT_FALLBACK_OFFSET_C = 5f
     }
 
     /**
@@ -44,7 +51,6 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
     suspend fun assembleFeatures(
         latitude: Double,
         longitude: Double,
-        currentCacheId: String,
     ): Map<String, Float?> {
         val delta = HISTORY_RADIUS_KM * DEG_PER_KM
         val history = db.weatherCacheDao().getObservationsNear(
@@ -67,7 +73,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
         // Map DB column names to model feature names
         val tempC = current.temp?.toFloat()
         val dewPointC = current.dewPointC?.toFloat()
-            ?: tempC?.let { it - 5f }    // fallback: temp - 5
+            ?: tempC?.let { it - DEWPOINT_FALLBACK_OFFSET_C }    // fallback: temp - offset
         val pressureHpa = current.pressure?.toFloat()
         val humidityPct = current.humidity?.toFloat()
         val windSpeedKmh = current.windSpeed?.toFloat()
@@ -78,7 +84,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
         val precipValues = sorted.map { it.precipitationAmount?.toFloat() ?: 0f }
         val windValues = sorted.map { it.windSpeed?.toFloat() }
         val tempValues = sorted.map { it.temp?.toFloat() }
-        val dewValues = sorted.map { it.dewPointC?.toFloat() ?: it.temp?.toFloat()?.let { t -> t - 5f } }
+        val dewValues = sorted.map { it.dewPointC?.toFloat() ?: it.temp?.toFloat()?.let { t -> t - DEWPOINT_FALLBACK_OFFSET_C } }
 
         val tempSpreadValues = tempValues.zip(dewValues).map { (t, d) ->
             if (t != null && d != null) t - d else null

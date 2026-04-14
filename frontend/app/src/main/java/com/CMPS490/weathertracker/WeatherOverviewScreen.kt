@@ -40,6 +40,9 @@ import java.util.concurrent.atomic.AtomicReference
 
 // Storm probability threshold from model_metadata.json
 private const val STORM_ALERT_THRESHOLD = 0.4901f
+// Storm risk timeline bar height bounds (dp)
+private const val MAX_BAR_HEIGHT_DP = 48f
+private const val MIN_BAR_HEIGHT_DP = 4f
 val NavyDark = Color(0xFF0A1931)
 val NavyLight = Color(0xFF185ABD)
 val CardBackground = Color(0xFF1E2A44).copy(alpha = 0.7f)
@@ -160,7 +163,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                 timeline.takeLast(24).forEach { (timestamp, probability) ->
                     val isAlert = probability >= STORM_ALERT_THRESHOLD
                     val barColor = if (isAlert) AlertGold else NavyLight
-                    val barHeight = (probability * 48).coerceAtLeast(4f)
+                    val barHeight = (probability * MAX_BAR_HEIGHT_DP).coerceAtLeast(MIN_BAR_HEIGHT_DP)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.weight(1f),

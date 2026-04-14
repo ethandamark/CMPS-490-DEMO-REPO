@@ -117,7 +117,7 @@ class LocationTrackingService : Service() {
     }
 
     companion object {
-        private const val MILLIS_PER_HOUR = 3_600_000L
+        const val MILLIS_PER_HOUR = 3_600_000L
     }
     
     override fun onCreate() {
@@ -364,7 +364,7 @@ class LocationTrackingService : Service() {
 
             // Run on-device prediction
             val featureService = FeatureAssemblyService(db)
-            val features = featureService.assembleFeatures(latitude, longitude, cacheId)
+            val features = featureService.assembleFeatures(latitude, longitude)
             if (features.isNotEmpty()) {
                 val predictor = OnDevicePredictor.getInstance(this)
                 val result = predictor.predict(features)

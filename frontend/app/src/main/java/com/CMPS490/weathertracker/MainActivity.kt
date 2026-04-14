@@ -424,7 +424,7 @@ class MainActivity : ComponentActivity() {
                     val deviceId = storedDeviceId ?: return@LaunchedEffect
                     val db = com.CMPS490.weathertracker.data.WeatherDatabase.getInstance(context)
                     val nowMs = System.currentTimeMillis()
-                    val predictions = db.hourlyPredictionDao().getPredictionsFrom(nowMs - 3_600_000L)
+                    val predictions = db.hourlyPredictionDao().getPredictionsFrom(nowMs - LocationTrackingService.MILLIS_PER_HOUR)
                     stormRiskTimeline = predictions.map { it.timestamp to it.stormProbability }
                 }
 

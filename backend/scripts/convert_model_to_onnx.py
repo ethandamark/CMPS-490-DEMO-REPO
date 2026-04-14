@@ -50,6 +50,8 @@ def main() -> None:
 
         n_features = len(feature_cols)
         initial_type = [("float_input", FloatTensorType([None, n_features]))]
+        # Opset 17 is the latest opset fully supported by ONNX Runtime 1.17.x on Android.
+        # It covers all operators used by scikit-learn's SimpleImputer and XGBoost pipeline.
         onnx_model = convert_sklearn(base_model, initial_types=initial_type, target_opset=17)
 
         with open(ONNX_PATH, "wb") as f:

@@ -144,24 +144,24 @@ class SnapshotSyncWorker(
             snapshotsArray.add(entry)
         }
 
-        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+        // Bridge the callback-based Retrofit call into a coroutine result
+        val ids = unsynced.map { it.snapshot.offlineWeatherId }
+        val syncResult = kotlinx.coroutines.suspendCancellableCoroutine<kotlin.Result<Unit>> { cont ->
             BackendRepository.syncSnapshots(
                 deviceId = deviceId,
                 snapshotsJson = snapshotsArray,
-                onSuccess = { _ ->
-                    val now = System.currentTimeMillis()
-                    val ids = unsynced.map { it.snapshot.offlineWeatherId }
-                    kotlinx.coroutines.runBlocking {
-                        db.offlineWeatherSnapshotDao().markSynced(ids, now)
-                    }
-                    Log.i(TAG, "✓ Synced ${ids.size} snapshots to backend")
-                    cont.resume(Result.success()) {}
-                },
-                onError = { e ->
-                    Log.e(TAG, "✗ Sync failed: ${e.message}")
-                    cont.resume(Result.retry()) {}
-                },
+                onSuccess = { _ -> cont.resume(kotlin.Result.success(Unit)) {} },
+                onError = { e -> cont.resume(kotlin.Result.failure(e)) {} },
             )
+        }
+
+        return if (syncResult.isSuccess) {
+            db.offlineWeatherSnapshotDao().markSynced(ids, System.currentTimeMillis())
+            Log.i(TAG, "✓ Synced ${ids.size} snapshots to backend")
+            Result.success()
+        } else {
+            Log.e(TAG, "✗ Sync failed: ${syncResult.exceptionOrNull()?.message}")
+            Result.retry()
         }
     }
 }
