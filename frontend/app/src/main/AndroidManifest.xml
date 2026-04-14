@@ -36,15 +36,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Firebase Cloud Messaging Service -->
-        <service
-            android:name=".WeatherTrackerMessagingService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
-
         <!-- Background Location Tracking Service -->
         <service
             android:name=".LocationTrackingService"

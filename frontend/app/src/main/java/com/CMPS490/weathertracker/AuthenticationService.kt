@@ -13,8 +13,6 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.Tasks
-import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -112,21 +110,8 @@ class AuthenticationService(private val context: Context) {
             }
         }
 
-        // Get FCM token before registering so device_token is filled at creation
-        var fcmToken: String? = null
-        try {
-            fcmToken = withContext(Dispatchers.IO) {
-                Tasks.await(FirebaseMessaging.getInstance().token, 10, TimeUnit.SECONDS)
-            }
-            Log.d(TAG, "  FCM token obtained: ${fcmToken?.take(20)}...")
-        } catch (e: Exception) {
-            Log.w(TAG, "  FCM token fetch failed, will be null at creation", e)
-        }
-        Log.d(TAG, "  Sending deviceToken to backend: ${if (fcmToken != null) "present (${fcmToken!!.length} chars)" else "NULL"}")
-
         BackendRepository.register(
             locationPermissionStatus = hasLocationPermission,
-            deviceToken = fcmToken,
             latitude = latitude,
             longitude = longitude,
             onSuccess = { userId, devId ->

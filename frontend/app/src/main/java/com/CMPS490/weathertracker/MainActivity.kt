@@ -94,7 +94,6 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import com.google.firebase.messaging.FirebaseMessaging
 
 private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
 private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
@@ -297,26 +296,6 @@ class MainActivity : ComponentActivity() {
                         Log.d("MainActivity", "")
                         Log.d("MainActivity", "✓ App ready to use! You are authenticated.")
                         Log.d("MainActivity", "")
-                        
-                        // Register the device's FCM token with the backend
-                        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                            if (task.isSuccessful) {
-                                val fcmToken = task.result
-                                Log.d("MainActivity", "FCM Token obtained, sending to backend...")
-                                BackendRepository.registerDeviceToken(
-                                    deviceToken = fcmToken,
-                                    deviceId = deviceId,
-                                    onSuccess = {
-                                        Log.d("MainActivity", "✓ FCM token registered with backend")
-                                    },
-                                    onError = { error ->
-                                        Log.e("MainActivity", "✗ Failed to register FCM token: $error")
-                                    }
-                                )
-                            } else {
-                                Log.e("MainActivity", "✗ Failed to get FCM token: ${task.exception?.message}")
-                            }
-                        }
                     } catch (e: Exception) {
                         Log.e("MainActivity", "")
                         Log.e("MainActivity", "✗ Authentication failed - ${e.message}", e)
@@ -438,6 +417,34 @@ class MainActivity : ComponentActivity() {
                 var forecastWeather by remember { mutableStateOf<List<DailyForecastUiModel>>(emptyList()) }
                 var activeRequestKey by remember { mutableStateOf("") }
                 var locationName by remember { mutableStateOf("") }
+                var stormRiskTimeline by remember { mutableStateOf<List<Pair<Long, Float>>>(emptyList()) }
+
+                // Load storm risk timeline from Room DB
+                LaunchedEffect(storedDeviceId) {
+                    val deviceId = storedDeviceId ?: return@LaunchedEffect
+                    val db = com.CMPS490.weathertracker.data.WeatherDatabase.getInstance(context)
+                    val nowMs = System.currentTimeMillis()
+                    val predictions = db.hourlyPredictionDao().getPredictionsFrom(nowMs - 3_600_000L)
+                    stormRiskTimeline = predictions.map { it.timestamp to it.stormProbability }
+                }
+
+                // Initialize WorkManager tasks
+                LaunchedEffect(registrationComplete) {
+                    if (!registrationComplete) return@LaunchedEffect
+                    com.CMPS490.weathertracker.sync.SnapshotSyncManager.init(context)
+                    val forecastRequest = androidx.work.PeriodicWorkRequestBuilder<com.CMPS490.weathertracker.data.ForecastFetcher>(
+                        6, java.util.concurrent.TimeUnit.HOURS
+                    ).setConstraints(
+                        androidx.work.Constraints.Builder()
+                            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                            .build()
+                    ).build()
+                    androidx.work.WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                        com.CMPS490.weathertracker.data.ForecastFetcher.WORK_NAME,
+                        androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+                        forecastRequest,
+                    )
+                }
 
                 // Fetch location name using reverse geocoding
                 LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
@@ -648,7 +655,8 @@ class MainActivity : ComponentActivity() {
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
                             onLocationSelected = { selectedLocationOption = it },
-                            onLiveRadarClick = { navController.navigate("map_screen") }
+                            onLiveRadarClick = { navController.navigate("map_screen") },
+                            stormRiskTimeline = stormRiskTimeline,
                         )
                     }
                     composable("map_screen") {
@@ -1228,33 +1236,8 @@ private fun findSteppedFrameIndex(
 }
 
 /**
- * Register the device's FCM token with the backend.
- * The FCM token is generated by Google's Firebase SDK on the device itself
- * and cannot be created server-side. This updates the existing device record
- * in Supabase with the device_token field via the backend proxy.
+ * (Removed — Firebase/FCM support has been removed from this project.)
  */
 private fun registerFCMToken(deviceId: String) {
-    try {
-        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-            if (task.isSuccessful) {
-                val fcmToken = task.result
-                Log.d("MainActivity", "FCM Token obtained, sending to backend...")
-
-                BackendRepository.registerDeviceToken(
-                    deviceToken = fcmToken,
-                    deviceId = deviceId,
-                    onSuccess = {
-                        Log.d("MainActivity", "✓ FCM token registered with backend")
-                    },
-                    onError = { error ->
-                        Log.e("MainActivity", "✗ Failed to register FCM token: $error")
-                    }
-                )
-            } else {
-                Log.e("MainActivity", "✗ Failed to get FCM token: ${task.exception?.message}")
-            }
-        }
-    } catch (e: Exception) {
-        Log.e("MainActivity", "✗ Error registering FCM token: ${e.message}", e)
-    }
+    Log.d("MainActivity", "FCM token registration skipped (Firebase removed)")
 }

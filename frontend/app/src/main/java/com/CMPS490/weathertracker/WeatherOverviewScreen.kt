@@ -33,9 +33,13 @@ import com.google.android.gms.maps.model.TileOverlayOptions
 import com.google.android.gms.maps.model.UrlTileProvider
 import com.google.maps.android.compose.*
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
-// Custom Colors based on Mockup
+// Storm probability threshold from model_metadata.json
+private const val STORM_ALERT_THRESHOLD = 0.4901f
 val NavyDark = Color(0xFF0A1931)
 val NavyLight = Color(0xFF185ABD)
 val CardBackground = Color(0xFF1E2A44).copy(alpha = 0.7f)
@@ -51,7 +55,8 @@ fun WeatherOverviewScreen(
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
     onLocationSelected: (LocationOptionUiModel) -> Unit,
-    onLiveRadarClick: () -> Unit
+    onLiveRadarClick: () -> Unit,
+    stormRiskTimeline: List<Pair<Long, Float>> = emptyList(),
 ) {
     Box(
         modifier = Modifier
@@ -108,6 +113,12 @@ fun WeatherOverviewScreen(
             item {
                 RadarAttributionFooter()
             }
+
+            if (stormRiskTimeline.isNotEmpty()) {
+                item {
+                    StormRiskTimelineCard(stormRiskTimeline)
+                }
+            }
         }
     }
 }
@@ -123,6 +134,65 @@ fun RadarAttributionFooter() {
             .fillMaxWidth()
             .padding(top = 4.dp, bottom = 12.dp)
     )
+}
+
+@Composable
+fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
+    val hourFormat = SimpleDateFormat("ha", Locale.US)
+    Surface(
+        color = CardBackground,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "STORM RISK TIMELINE",
+                style = MaterialTheme.typography.labelMedium,
+                color = MutedText,
+                letterSpacing = 1.5.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                timeline.takeLast(24).forEach { (timestamp, probability) ->
+                    val isAlert = probability >= STORM_ALERT_THRESHOLD
+                    val barColor = if (isAlert) AlertGold else NavyLight
+                    val barHeight = (probability * 48).coerceAtLeast(4f)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .height(barHeight.dp)
+                                .fillMaxWidth(0.6f)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(barColor),
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = hourFormat.format(Date(timestamp)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MutedText,
+                            fontSize = 8.sp,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Yellow bars indicate storm risk above threshold",
+                style = MaterialTheme.typography.labelSmall,
+                color = MutedText,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
 }
 
 @Composable

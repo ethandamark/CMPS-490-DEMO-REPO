@@ -1,0 +1,33 @@
+{
+  "experiment_name": "baseline_surface",
+  "feature_cols": [
+    "temp_c",
+    "pressure_hPa",
+    "humidity_pct",
+    "wind_speed_kmh",
+    "precip_mm",
+    "precip_6h",
+    "precip_24h",
+    "precip_rate_change",
+    "precip_max_3h",
+    "pressure_change_1h",
+    "pressure_change_3h",
+    "pressure_change_6h",
+    "pressure_change_12h",
+    "pressure_drop_rate",
+    "temp_dewpoint_spread",
+    "dewpoint_spread_change",
+    "wind_speed_change_1h",
+    "wind_speed_change_3h",
+    "wind_max_3h",
+    "hour",
+    "month",
+    "is_afternoon",
+    "latitude",
+    "longitude",
+    "elevation",
+    "dist_to_coast_km"
+  ],
+  "threshold": 0.4900662302970886,
+  "isotonic_table": null
+}

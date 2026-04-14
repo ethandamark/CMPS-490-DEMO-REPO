@@ -140,7 +140,6 @@ object BackendRepository {
      */
     fun register(
         locationPermissionStatus: Boolean = false,
-        deviceToken: String? = null,
         latitude: Double? = null,
         longitude: Double? = null,
         onSuccess: (userId: String, deviceId: String) -> Unit,
@@ -151,7 +150,6 @@ object BackendRepository {
             Log.d(TAG, "  locationPermissionStatus=$locationPermissionStatus, lat=$latitude, lon=$longitude")
             val record = JsonObject().apply {
                 addProperty("locationPermissionStatus", locationPermissionStatus)
-                deviceToken?.let { addProperty("deviceToken", it) }
                 latitude?.let { addProperty("latitude", it) }
                 longitude?.let { addProperty("longitude", it) }
             }
@@ -213,142 +211,60 @@ object BackendRepository {
     }
     
     
-    // ===== FIREBASE NOTIFICATIONS =====
-    
+    // ===== SYNC OPERATIONS =====
+
     /**
-     * Register device FCM token with backend
+     * Sync local snapshots to backend and get server-side snapshots.
      */
-    fun registerDeviceToken(
-        deviceToken: String,
+    fun syncSnapshots(
         deviceId: String,
-        userId: String? = null,
-        onSuccess: () -> Unit,
-        onError: (Exception) -> Unit
+        snapshotsJson: com.google.gson.JsonArray,
+        onSuccess: (JsonObject) -> Unit,
+        onError: (Exception) -> Unit,
     ) {
         try {
-            Log.d(TAG, "→ Registering device token for: $deviceId")
-            val record = JsonObject().apply {
-                addProperty("device_token", deviceToken)
-                addProperty("device_id", deviceId)
-                userId?.let { addProperty("user_id", it) }
-            }
-            
-            val call = api.registerDeviceToken(record)
-            call.enqueue(object : Callback<JsonObject> {
+            val body = JsonObject().apply { add("snapshots", snapshotsJson) }
+            api.syncSnapshots(deviceId, body).enqueue(object : Callback<JsonObject> {
                 override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "✓ Device token registered successfully")
-                        onSuccess()
+                    if (response.isSuccessful && response.body() != null) {
+                        onSuccess(response.body()!!)
                     } else {
-                        Log.e(TAG, "✗ Token registration error: ${response.code()}")
-                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
+                        onError(Exception("HTTP ${response.code()}"))
                     }
                 }
-                
-                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
-                    Log.e(TAG, "✗ Token registration failure: ${t.message}", t)
-                    onError(t as Exception)
-                }
+                override fun onFailure(call: Call<JsonObject>, t: Throwable) = onError(t as Exception)
             })
         } catch (e: Exception) {
-            Log.e(TAG, "✗ Error registering device token: ${e.message}", e)
             onError(e)
         }
     }
-    
+
     /**
-     * Send a notification via backend
+     * Fetch device snapshots from server since a given timestamp.
      */
-    fun sendNotification(
-        deviceToken: String,
-        title: String,
-        body: String,
-        data: Map<String, String>? = null,
-        notificationType: String = "alert",
-        onSuccess: () -> Unit,
-        onError: (Exception) -> Unit
+    fun getDeviceSnapshots(
+        deviceId: String,
+        since: String? = null,
+        onSuccess: (JsonObject) -> Unit,
+        onError: (Exception) -> Unit,
     ) {
         try {
-            Log.d(TAG, "→ Sending notification: $title")
-            val record = JsonObject().apply {
-                addProperty("device_token", deviceToken)
-                addProperty("title", title)
-                addProperty("body", body)
-                addProperty("notification_type", notificationType)
-                data?.let {
-                    val dataObj = JsonObject()
-                    it.forEach { (k, v) -> dataObj.addProperty(k, v) }
-                    add("data", dataObj)
-                }
-            }
-            
-            val call = api.sendNotification(record)
-            call.enqueue(object : Callback<JsonObject> {
+            api.getDeviceSnapshots(deviceId, since).enqueue(object : Callback<JsonObject> {
                 override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "✓ Notification sent successfully")
-                        onSuccess()
+                    if (response.isSuccessful && response.body() != null) {
+                        onSuccess(response.body()!!)
                     } else {
-                        Log.e(TAG, "✗ Notification send error: ${response.code()}")
-                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
+                        onError(Exception("HTTP ${response.code()}"))
                     }
                 }
-                
-                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
-                    Log.e(TAG, "✗ Notification send failure: ${t.message}", t)
-                    onError(t as Exception)
-                }
+                override fun onFailure(call: Call<JsonObject>, t: Throwable) = onError(t as Exception)
             })
         } catch (e: Exception) {
-            Log.e(TAG, "✗ Error sending notification: ${e.message}", e)
             onError(e)
         }
     }
-    
-    /**
-     * Send a weather alert notification
-     */
-    fun sendWeatherAlert(
-        deviceToken: String,
-        location: String,
-        alertType: String,
-        description: String,
-        onSuccess: () -> Unit,
-        onError: (Exception) -> Unit
-    ) {
-        try {
-            Log.d(TAG, "→ Sending weather alert: $alertType for $location")
-            val record = JsonObject().apply {
-                addProperty("device_token", deviceToken)
-                addProperty("location", location)
-                addProperty("alert_type", alertType)
-                addProperty("description", description)
-            }
-            
-            val call = api.sendWeatherAlert(record)
-            call.enqueue(object : Callback<JsonObject> {
-                override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "✓ Weather alert sent successfully")
-                        onSuccess()
-                    } else {
-                        Log.e(TAG, "✗ Weather alert send error: ${response.code()}")
-                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
-                    }
-                }
-                
-                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
-                    Log.e(TAG, "✗ Weather alert send failure: ${t.message}", t)
-                    onError(t as Exception)
-                }
-            })
-        } catch (e: Exception) {
-            Log.e(TAG, "✗ Error sending weather alert: ${e.message}", e)
-            onError(e)
-        }
-    }
-    
-    
+
+
     // ===== HEALTH CHECK =====
     
     /**
