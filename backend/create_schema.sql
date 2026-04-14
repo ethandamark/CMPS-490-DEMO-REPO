@@ -38,7 +38,6 @@ CREATE TABLE device (
     device_id UUID PRIMARY KEY,
     anon_user_id UUID UNIQUE REFERENCES anonymous_user(anon_user_id),
     alert_token UUID UNIQUE DEFAULT gen_random_uuid(),
-    device_token TEXT,
     platform platform_enum,
     app_version VARCHAR(50),
     location_permission_status BOOLEAN,
@@ -64,6 +63,8 @@ CREATE TABLE device_location (
 
 --------------------------------------------------
 -- 4. Weather Cache
+--    Stores weather observations and forecasts.
+--    Added ML features (migration 005) for on-device inference.
 --------------------------------------------------
 CREATE TABLE weather_cache (
     cache_id UUID PRIMARY KEY,
@@ -78,8 +79,29 @@ CREATE TABLE weather_cache (
     latitude DECIMAL(9,6),
     longitude DECIMAL(9,6),
     result_level INT CHECK (result_level BETWEEN 0 AND 5),
-    result_type result_type_enum
+    result_type result_type_enum,
+
+    -- ML features (migration 005)
+    dew_point_c DOUBLE PRECISION,
+    elevation DOUBLE PRECISION,
+    dist_to_coast_km DOUBLE PRECISION,
+    nwp_cape_f3_6_max DOUBLE PRECISION,
+    nwp_cin_f3_6_max DOUBLE PRECISION,
+    nwp_pwat_f3_6_max DOUBLE PRECISION,
+    nwp_srh03_f3_6_max DOUBLE PRECISION,
+    nwp_li_f3_6_min DOUBLE PRECISION,
+    nwp_lcl_f3_6_min DOUBLE PRECISION,
+    nwp_available_leads DOUBLE PRECISION,
+    mrms_max_dbz_75km DOUBLE PRECISION,
+    is_forecast BOOLEAN DEFAULT FALSE
 );
+
+-- Indexes for efficient ML queries
+CREATE INDEX idx_weather_cache_is_forecast
+    ON weather_cache (is_forecast, recorded_at DESC);
+
+CREATE INDEX idx_weather_cache_location_time
+    ON weather_cache (latitude, longitude, recorded_at DESC);
 
 --------------------------------------------------
 -- 5. Model Instance
