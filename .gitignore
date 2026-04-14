@@ -7,12 +7,18 @@ local.properties
 .externalNativeBuild/
 .cxx/
 *.iml
-backend/__pycache__/
-lib/__pycache__/
-lib/**/__pycache__/
+__pycache__/
 
 # Python virtual environment
 backend/venv/
 backend/.venv/
-venv/
-.venv/
+
+# Supabase local temp files
+.branches/
+.temp/
+
+# Firebase credentials
+backend/firebase-key.json
+
+# Scratch SQL snippets
+Untitled query*
