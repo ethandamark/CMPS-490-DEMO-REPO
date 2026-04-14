@@ -44,10 +44,20 @@ class WeatherTrackerMessagingService : FirebaseMessagingService() {
             sendNotification(title, body, data)
         }
         
-        // Handle data payload
+        // Handle data payload — also show notification if notification payload was absent
         if (remoteMessage.data.isNotEmpty()) {
             Log.d(TAG, "Message data payload: ${remoteMessage.data}")
             handleDataMessage(remoteMessage.data)
+            
+            // If no notification payload, build one from data
+            if (remoteMessage.notification == null) {
+                val data = remoteMessage.data
+                val alertType = data["alert_type"]?.replaceFirstChar { it.uppercase() } ?: "Weather"
+                val severity = data["severity_level"] ?: ""
+                val title = "⚠️ $alertType Alert${if (severity.isNotEmpty()) " (Severity $severity)" else ""}"
+                val body = "A ${ alertType.lowercase() } alert has been issued near your area."
+                sendNotification(title, body, data)
+            }
         }
     }
     
