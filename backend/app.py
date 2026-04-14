@@ -214,6 +214,8 @@ class RegisterRequest(BaseModel):
     """Registration request â€” only device-side facts from frontend"""
     locationPermissionStatus: bool = False
     deviceToken: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 class RegisterDeviceTokenRequest(BaseModel):
     """Register FCM device token"""
@@ -264,6 +266,32 @@ class AlertEventResponse(BaseModel):
     severity_level: int
     created_at: str
     expires_at: str
+
+
+# ============= DEVICE LOCATION MODELS =============
+
+class CreateDeviceLocationRequest(BaseModel):
+    """Create device location record"""
+    device_id: str
+    latitude: float
+    longitude: float
+    captured_at: str | None = None  # Auto-generated if not provided
+
+
+class UpdateDeviceLocationRequest(BaseModel):
+    """Update device location record"""
+    latitude: float | None = None
+    longitude: float | None = None
+    captured_at: str | None = None
+
+
+class DeviceLocationResponse(BaseModel):
+    """Device location data"""
+    location_id: str
+    device_id: str
+    latitude: float
+    longitude: float
+    captured_at: str
 
 
 # ============= HEALTH CHECK =============
@@ -364,18 +392,72 @@ async def register_device(request: RegisterRequest):
                     existing = existing_response.json()
                     if existing:
                         device = existing[0]
-                        print(f"[REGISTER] Existing device found: {device['device_id']}, returning existing credentials")
+                        device_id = device['device_id']
+                        print(f"[REGISTER] Existing device found: {device_id}, returning existing credentials")
                         # Update last_seen_at
                         now = datetime.now(timezone.utc).isoformat()
                         await client.patch(
-                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device['device_id']}",
+                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device_id}",
                             json={"last_seen_at": now, "location_permission_status": request.locationPermissionStatus},
                             headers=headers,
                         )
+                        
+                        # AUTO-POPULATE DEVICE LOCATION for existing device if permission granted + coords provided
+                        if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
+                            # Check if device_location already exists for this device
+                            existing_loc_response = await client.get(
+                                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{device_id}&order=captured_at.desc&limit=1",
+                                headers=headers,
+                            )
+                            existing_locs = existing_loc_response.json() if existing_loc_response.status_code == 200 else []
+                            
+                            if not existing_locs:
+                                print(f"[REGISTER] Auto-creating device_location for existing device (permission=true, coords provided)")
+                                location_record = {
+                                    "location_id": str(uuid.uuid4()),
+                                    "device_id": device_id,
+                                    "latitude": request.latitude,
+                                    "longitude": request.longitude,
+                                    "captured_at": now,
+                                }
+                                print(f"[REGISTER] location_record: {location_record}")
+                                loc_response = await client.post(
+                                    f"{SUPABASE_BASE}/rest/v1/device_location",
+                                    json=location_record,
+                                    headers=headers,
+                                )
+                                if loc_response.status_code in [200, 201]:
+                                    print(f"✓ Device location auto-created: {location_record['location_id']}")
+                                else:
+                                    print(f"✗ Failed to auto-create device_location: {loc_response.text}")
+                            else:
+                                # Update existing location with new coordinates
+                                existing_loc = existing_locs[0]
+                                location_id = existing_loc["location_id"]
+                                print(f"[REGISTER] Updating existing device_location {location_id} with new coords")
+                                print(f"[REGISTER] Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
+                                print(f"[REGISTER] New: lat={request.latitude}, lon={request.longitude}")
+                                
+                                update_response = await client.patch(
+                                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
+                                    json={
+                                        "latitude": request.latitude,
+                                        "longitude": request.longitude,
+                                        "captured_at": now,
+                                    },
+                                    headers=headers,
+                                )
+                                if update_response.status_code in [200, 204]:
+                                    print(f"✓ Device location updated: {location_id}")
+                                else:
+                                    print(f"✗ Failed to update device_location: {update_response.text}")
+                        else:
+                            print(f"[REGISTER] Skipping device_location for existing device: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
+                        
                         return {
                             "success": True,
                             "userId": device["anon_user_id"],
-                            "deviceId": device["device_id"],
+                            "deviceId": device_id,
                             "alertToken": device["alert_token"],
                         }
 
@@ -435,7 +517,31 @@ async def register_device(request: RegisterRequest):
             print(f"[REGISTER] Device response: {device_response.text[:200]}")
 
             if device_response.status_code in [200, 201]:
-                print(f"âœ“ Registered: user={anon_user_id}, device={device_id}")
+                print(f"✓ Registered: user={anon_user_id}, device={device_id}")
+                
+                # AUTO-POPULATE DEVICE LOCATION if permission granted + coords provided
+                if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
+                    print(f"[REGISTER] Auto-creating device_location (permission=true, coords provided)")
+                    location_record = {
+                        "location_id": str(uuid.uuid4()),
+                        "device_id": device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                    print(f"[REGISTER] location_record: {location_record}")
+                    loc_response = await client.post(
+                        f"{SUPABASE_BASE}/rest/v1/device_location",
+                        json=location_record,
+                        headers=headers,
+                    )
+                    if loc_response.status_code in [200, 201]:
+                        print(f"✓ Device location auto-created: {location_record['location_id']}")
+                    else:
+                        print(f"✗ Failed to auto-create device_location: {loc_response.text}")
+                else:
+                    print(f"[REGISTER] Skipping device_location: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
+                
                 return {
                     "success": True,
                     "userId": anon_user_id,
@@ -443,7 +549,7 @@ async def register_device(request: RegisterRequest):
                     "alertToken": alert_token,
                 }
             else:
-                print(f"âœ— Error creating device: {device_response.text}")
+                print(f"✗ Error creating device: {device_response.text}")
                 return {"success": False, "error": f"Device creation failed: {device_response.text}"}
     except Exception as e:
         print(f"âœ— Exception in register_device: {str(e)}")
@@ -796,6 +902,147 @@ async def get_alert_delivery_status(alert_id: str):
                     "pending": sum(1 for r in rows if r.get("delivery_status") == "pending"),
                 }
                 return {"device_alerts": rows, "summary": summary}
+# ============= DEVICE LOCATION API ============
+
+@app.post("/device-location/create")
+async def create_device_location(request: CreateDeviceLocationRequest):
+    """
+    Create a new device location record.
+    Backend generates: location_id, captured_at (if not provided)
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION CREATE] Incoming request:")
+        print(f"  device_id:   {request.device_id}")
+        print(f"  latitude:    {request.latitude}")
+        print(f"  longitude:   {request.longitude}")
+        print(f"  captured_at: {request.captured_at or 'AUTO-GENERATE'}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+
+            location_id = str(uuid.uuid4())
+            captured_at = request.captured_at or datetime.now(timezone.utc).isoformat()
+
+            location_record = {
+                "location_id": location_id,
+                "device_id": request.device_id,
+                "latitude": request.latitude,
+                "longitude": request.longitude,
+                "captured_at": captured_at,
+            }
+
+            print(f"[DEVICE-LOCATION CREATE] Sending to Supabase:")
+            print(f"  URL:    {SUPABASE_BASE}/rest/v1/device_location")
+            print(f"  Record: {location_record}")
+
+            response = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/device_location",
+                json=location_record,
+                headers=headers,
+            )
+
+            print(f"[DEVICE-LOCATION CREATE] Supabase response:")
+            print(f"  Status: {response.status_code}")
+            print(f"  Body:   {response.text[:500] if response.text else 'EMPTY'}")
+
+            if response.status_code in [200, 201]:
+                print(f"✓ SUCCESS: Device location created with ID: {location_id}")
+                return {
+                    "success": True,
+                    "location_id": location_id,
+                    "device_id": request.device_id,
+                    "latitude": request.latitude,
+                    "longitude": request.longitude,
+                    "captured_at": captured_at,
+                }
+            else:
+                print(f"✗ FAILED to create device location: {response.text}")
+                raise HTTPException(status_code=500, detail=f"Failed: {response.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in create_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/device-location/by-device/{device_id}")
+async def get_device_locations_by_device(device_id: str, limit: int = 100):
+    """Get all location records for a specific device, ordered by most recent."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION BY-DEVICE] GET request:")
+        print(f"  device_id: {device_id}")
+        print(f"  limit:     {limit}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            
+            url = f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{device_id}&order=captured_at.desc&limit={limit}"
+            print(f"[DEVICE-LOCATION BY-DEVICE] Querying: {url}")
+
+            response = await client.get(url, headers=headers)
+
+            print(f"[DEVICE-LOCATION BY-DEVICE] Response:")
+            print(f"  Status: {response.status_code}")
+
+            if response.status_code == 200:
+                locations = response.json()
+                print(f"✓ SUCCESS: Found {len(locations)} locations for device {device_id}")
+                for i, loc in enumerate(locations[:5]):  # Print first 5
+                    print(f"  [{i+1}] lat={loc.get('latitude')}, lon={loc.get('longitude')}, captured_at={loc.get('captured_at')}")
+                if len(locations) > 5:
+                    print(f"  ... and {len(locations) - 5} more")
+                return {"success": True, "locations": locations, "count": len(locations)}
+            else:
+                print(f"✗ FAILED: {response.text}")
+                raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in get_device_locations_by_device: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/device-location/{location_id}")
+async def get_device_location_by_id(location_id: str):
+    """Get a specific device location by ID."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION GET-BY-ID] Request:")
+        print(f"  location_id: {location_id}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            
+            url = f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}"
+            print(f"[DEVICE-LOCATION GET-BY-ID] Querying: {url}")
+
+            response = await client.get(url, headers=headers)
+
+            print(f"[DEVICE-LOCATION GET-BY-ID] Response:")
+            print(f"  Status: {response.status_code}")
+            print(f"  Body:   {response.text[:500] if response.text else 'EMPTY'}")
+
+            if response.status_code == 200:
+                locations = response.json()
+                if locations:
+                    print(f"✓ SUCCESS: Found location {location_id}")
+                    return {"success": True, "location": locations[0]}
+                print(f"✗ NOT FOUND: Location {location_id} does not exist")
+                raise HTTPException(status_code=404, detail="Device location not found")
+            print(f"✗ FAILED: {response.text}")
             raise HTTPException(status_code=500, detail=response.text)
     except HTTPException:
         raise
@@ -845,6 +1092,254 @@ async def cleanup_old_device_alerts(retention_days: int = 30):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"✗ EXCEPTION in get_device_location_by_id: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/device-location/{location_id}")
+async def update_device_location(location_id: str, request: UpdateDeviceLocationRequest):
+    """Update a device location record."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION UPDATE] Request:")
+        print(f"  location_id: {location_id}")
+        print(f"  latitude:    {request.latitude}")
+        print(f"  longitude:   {request.longitude}")
+        print(f"  captured_at: {request.captured_at}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+
+            # Build update payload with only provided fields
+            update_data = {}
+            if request.latitude is not None:
+                update_data["latitude"] = request.latitude
+            if request.longitude is not None:
+                update_data["longitude"] = request.longitude
+            if request.captured_at is not None:
+                update_data["captured_at"] = request.captured_at
+
+            if not update_data:
+                print(f"✗ ERROR: No fields to update")
+                raise HTTPException(status_code=400, detail="No fields to update")
+
+            url = f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}"
+            print(f"[DEVICE-LOCATION UPDATE] Sending PATCH to: {url}")
+            print(f"[DEVICE-LOCATION UPDATE] Update data: {update_data}")
+
+            response = await client.patch(url, json=update_data, headers=headers)
+
+            print(f"[DEVICE-LOCATION UPDATE] Response:")
+            print(f"  Status: {response.status_code}")
+            print(f"  Body:   {response.text[:500] if response.text else 'EMPTY'}")
+
+            if response.status_code in [200, 204]:
+                result = response.json() if response.text else []
+                if result:
+                    print(f"✓ SUCCESS: Updated location {location_id}")
+                    return {"success": True, "location": result[0]}
+                print(f"✗ NOT FOUND: Location {location_id} does not exist")
+                raise HTTPException(status_code=404, detail="Device location not found")
+            print(f"✗ FAILED: {response.text}")
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in update_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/device-location/{location_id}")
+async def delete_device_location(location_id: str):
+    """Delete a device location record."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION DELETE] Request:")
+        print(f"  location_id: {location_id}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Prefer": "return=representation"}
+            
+            url = f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}"
+            print(f"[DEVICE-LOCATION DELETE] Sending DELETE to: {url}")
+
+            response = await client.delete(url, headers=headers)
+
+            print(f"[DEVICE-LOCATION DELETE] Response:")
+            print(f"  Status: {response.status_code}")
+            print(f"  Body:   {response.text[:500] if response.text else 'EMPTY'}")
+
+            if response.status_code in [200, 204]:
+                print(f"✓ SUCCESS: Deleted location {location_id}")
+                return {"success": True, "message": f"Device location {location_id} deleted"}
+            print(f"✗ FAILED: {response.text}")
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in delete_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/device-location/latest/{device_id}")
+async def get_latest_device_location(device_id: str):
+    """Get the most recent location for a device."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION LATEST] Request:")
+        print(f"  device_id: {device_id}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            
+            url = f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{device_id}&order=captured_at.desc&limit=1"
+            print(f"[DEVICE-LOCATION LATEST] Querying: {url}")
+
+            response = await client.get(url, headers=headers)
+
+            print(f"[DEVICE-LOCATION LATEST] Response:")
+            print(f"  Status: {response.status_code}")
+            print(f"  Body:   {response.text[:500] if response.text else 'EMPTY'}")
+
+            if response.status_code == 200:
+                locations = response.json()
+                if locations:
+                    loc = locations[0]
+                    print(f"✓ SUCCESS: Latest location for {device_id}:")
+                    print(f"  location_id: {loc.get('location_id')}")
+                    print(f"  latitude:    {loc.get('latitude')}")
+                    print(f"  longitude:   {loc.get('longitude')}")
+                    print(f"  captured_at: {loc.get('captured_at')}")
+                    return {"success": True, "location": locations[0]}
+                print(f"✗ NOT FOUND: No location found for device {device_id}")
+                raise HTTPException(status_code=404, detail="No location found for device")
+            print(f"✗ FAILED: {response.text}")
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in get_latest_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/device-location/update-current")
+async def update_current_device_location(request: CreateDeviceLocationRequest):
+    """
+    Update or create the current location for a device (upsert behavior).
+    Used by background location tracking service.
+    - If a location exists for the device, updates it
+    - If no location exists, creates a new one
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"[DEVICE-LOCATION UPDATE-CURRENT] Request:")
+        print(f"  device_id: {request.device_id}")
+        print(f"  latitude:  {request.latitude}")
+        print(f"  longitude: {request.longitude}")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+            
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Check if location exists for this device
+            existing_response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{request.device_id}&order=captured_at.desc&limit=1",
+                headers=headers,
+            )
+            existing_locs = existing_response.json() if existing_response.status_code == 200 else []
+            
+            if existing_locs:
+                # Update existing location
+                existing_loc = existing_locs[0]
+                location_id = existing_loc["location_id"]
+                print(f"[UPDATE-CURRENT] Updating existing location: {location_id}")
+                print(f"  Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
+                print(f"  New: lat={request.latitude}, lon={request.longitude}")
+                
+                response = await client.patch(
+                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
+                    json={
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    },
+                    headers=headers,
+                )
+                
+                if response.status_code in [200, 204]:
+                    print(f"✓ Location updated: {location_id}")
+                    return {
+                        "success": True,
+                        "action": "updated",
+                        "location_id": location_id,
+                        "device_id": request.device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                else:
+                    print(f"✗ Failed to update: {response.text}")
+                    raise HTTPException(status_code=500, detail=response.text)
+            else:
+                # Create new location
+                location_id = str(uuid.uuid4())
+                print(f"[UPDATE-CURRENT] Creating new location: {location_id}")
+                
+                location_record = {
+                    "location_id": location_id,
+                    "device_id": request.device_id,
+                    "latitude": request.latitude,
+                    "longitude": request.longitude,
+                    "captured_at": now,
+                }
+                
+                response = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/device_location",
+                    json=location_record,
+                    headers=headers,
+                )
+                
+                if response.status_code in [200, 201]:
+                    print(f"✓ Location created: {location_id}")
+                    return {
+                        "success": True,
+                        "action": "created",
+                        "location_id": location_id,
+                        "device_id": request.device_id,
+                        "latitude": request.latitude,
+                        "longitude": request.longitude,
+                        "captured_at": now,
+                    }
+                else:
+                    print(f"✗ Failed to create: {response.text}")
+                    raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ EXCEPTION in update_current_device_location: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -868,4 +1363,6 @@ async def predict(request: PredictionRequest):
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     reload = os.getenv('DEBUG', 'False') == 'True'
-    uvicorn.run(app, host='127.0.0.1', port=port, reload=reload)
+    # Use 0.0.0.0 to accept connections from Android emulator (10.0.2.2)
+    uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
+    

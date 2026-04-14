@@ -1,16 +1,27 @@
 package com.CMPS490.weathertracker
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.Location
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 class AuthenticationService(private val context: Context) {
     companion object {
@@ -53,6 +64,54 @@ class AuthenticationService(private val context: Context) {
         ) == PackageManager.PERMISSION_GRANTED
         Log.d(TAG, "  Location permission granted: $hasLocationPermission")
 
+        // Get device location if permission granted
+        var latitude: Double? = null
+        var longitude: Double? = null
+        if (hasLocationPermission) {
+            try {
+                val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
+                
+                // Use requestLocationUpdates with a single update to force fresh location
+                // This works better with mock locations than getCurrentLocation
+                @SuppressLint("MissingPermission")
+                val location = withTimeoutOrNull(10_000L) {
+                    suspendCancellableCoroutine<Location?> { continuation ->
+                        val locationRequest = LocationRequest.Builder(
+                            Priority.PRIORITY_HIGH_ACCURACY,
+                            1000L
+                        ).setMaxUpdates(1).build()
+                        
+                        val callback = object : LocationCallback() {
+                            override fun onLocationResult(result: LocationResult) {
+                                fusedLocationClient.removeLocationUpdates(this)
+                                continuation.resume(result.lastLocation)
+                            }
+                        }
+                        
+                        fusedLocationClient.requestLocationUpdates(
+                            locationRequest,
+                            callback,
+                            Looper.getMainLooper()
+                        )
+                        
+                        continuation.invokeOnCancellation {
+                            fusedLocationClient.removeLocationUpdates(callback)
+                        }
+                    }
+                }
+                
+                if (location != null) {
+                    latitude = location.latitude
+                    longitude = location.longitude
+                    Log.d(TAG, "  Device location obtained: lat=$latitude, lon=$longitude")
+                } else {
+                    Log.w(TAG, "  Location is null (GPS may not have a fix yet)")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "  Failed to get device location: ${e.message}")
+            }
+        }
+
         // Get FCM token before registering so device_token is filled at creation
         var fcmToken: String? = null
         try {
@@ -68,6 +127,8 @@ class AuthenticationService(private val context: Context) {
         BackendRepository.register(
             locationPermissionStatus = hasLocationPermission,
             deviceToken = fcmToken,
+            latitude = latitude,
+            longitude = longitude,
             onSuccess = { userId, devId ->
                 anonUserId = userId
                 deviceId = devId
@@ -79,7 +140,11 @@ class AuthenticationService(private val context: Context) {
             }
         )
 
-        if (!latch.await(30, TimeUnit.SECONDS)) {
+        // Move blocking await to IO thread to prevent ANR
+        val timedOut = withContext(Dispatchers.IO) {
+            !latch.await(60, TimeUnit.SECONDS)
+        }
+        if (timedOut) {
             throw Exception("Timeout waiting for registration")
         }
         if (error != null) {
