@@ -12,7 +12,8 @@ from firebase_notifications import firebase_service
 import uuid
 import secrets
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from math import radians, cos, sin, sqrt, atan2
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +48,147 @@ def generate_alert_token() -> str:
     Format: UUID v4 string
     """
     return str(uuid.uuid4())
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in km between two lat/lon points."""
+    R = 6371
+    dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return 2 * R * atan2(sqrt(a), sqrt(1 - a))
+
+
+async def _find_eligible_devices(client: httpx.AsyncClient, lat: float, lon: float, radius_km: float = 50.0) -> list[dict]:
+    """
+    Find devices whose most recent device_location is within radius_km of (lat, lon).
+    Falls back to returning ALL devices with a device_token if no location data exists.
+    """
+    headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+
+    # Get all devices that have a device_token (needed for push notifications)
+    dev_resp = await client.get(
+        f"{SUPABASE_BASE}/rest/v1/device?device_token=not.is.null&select=device_id,device_token",
+        headers=headers,
+    )
+    if dev_resp.status_code != 200:
+        print(f"[DEVICE_ALERT] Failed to fetch devices: {dev_resp.text}")
+        return []
+
+    devices = dev_resp.json()
+    if not devices:
+        return []
+
+    # Get latest location per device
+    loc_resp = await client.get(
+        f"{SUPABASE_BASE}/rest/v1/device_location?select=device_id,latitude,longitude&order=captured_at.desc",
+        headers=headers,
+    )
+    locations_by_device: dict[str, dict] = {}
+    if loc_resp.status_code == 200:
+        for loc in loc_resp.json():
+            did = loc["device_id"]
+            if did not in locations_by_device:
+                locations_by_device[did] = loc
+
+    eligible: list[dict] = []
+    for dev in devices:
+        did = dev["device_id"]
+        loc = locations_by_device.get(did)
+        if loc:
+            dist = haversine_km(lat, lon, float(loc["latitude"]), float(loc["longitude"]))
+            if dist <= radius_km:
+                eligible.append(dev)
+        else:
+            # No location data — include device (better to over-notify than miss)
+            eligible.append(dev)
+
+    print(f"[DEVICE_ALERT] {len(eligible)} eligible devices out of {len(devices)} total (radius={radius_km}km)")
+    return eligible
+
+
+async def _create_device_alert_rows(client: httpx.AsyncClient, alert_id: str, devices: list[dict]) -> list[dict]:
+    """
+    Bulk-insert device_alert rows with delivery_status='pending' for each eligible device.
+    Returns the created rows.
+    """
+    if not devices:
+        return []
+
+    headers = {
+        "apikey": SUPABASE_API_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation,resolution=ignore-duplicates",
+    }
+
+    rows = [
+        {
+            "device_alert_id": str(uuid.uuid4()),
+            "device_id": dev["device_id"],
+            "alert_id": alert_id,
+            "delivery_status": "pending",
+            "sent_at": None,
+        }
+        for dev in devices
+    ]
+
+    resp = await client.post(
+        f"{SUPABASE_BASE}/rest/v1/device_alert",
+        json=rows,
+        headers=headers,
+    )
+
+    if resp.status_code in [200, 201]:
+        created = resp.json()
+        print(f"[DEVICE_ALERT] Inserted {len(created)} device_alert rows for alert {alert_id}")
+        return created
+    else:
+        print(f"[DEVICE_ALERT] Failed to insert device_alert rows: {resp.text}")
+        return []
+
+
+async def _send_and_update_device_alerts(client: httpx.AsyncClient, alert_record: dict, device_alert_rows: list[dict], devices: list[dict]):
+    """
+    Attempt to send push notifications for each device_alert row,
+    then update delivery_status to 'sent' or 'failed'.
+    """
+    headers = {
+        "apikey": SUPABASE_API_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+    # Build a device_id -> device_token lookup
+    token_map = {dev["device_id"]: dev["device_token"] for dev in devices}
+
+    title = f"⚠️ {alert_record['alert_type'].title()} Alert (Severity {alert_record['severity_level']})"
+    body = f"A {alert_record['alert_type']} alert has been issued near your area."
+
+    for row in device_alert_rows:
+        device_token = token_map.get(row["device_id"])
+        if not device_token:
+            status = "failed"
+        else:
+            success = firebase_service.send_notification(
+                device_token=device_token,
+                title=title,
+                body=body,
+                data={
+                    "type": "weather_alert",
+                    "alert_id": alert_record["alert_id"],
+                    "alert_type": alert_record["alert_type"],
+                    "severity_level": str(alert_record["severity_level"]),
+                },
+                notification_type="weather",
+            )
+            status = "sent" if success else "failed"
+
+        now = datetime.now(timezone.utc).isoformat()
+        await client.patch(
+            f"{SUPABASE_BASE}/rest/v1/device_alert?device_alert_id=eq.{row['device_alert_id']}",
+            json={"delivery_status": status, "sent_at": now if status == "sent" else None},
+            headers=headers,
+        )
+        print(f"[DEVICE_ALERT] {row['device_alert_id']} -> {status}")
 
 
 # ============= REQUEST/RESPONSE MODELS =============
@@ -581,10 +723,12 @@ async def send_weather_alert(request: WeatherAlertNotificationRequest):
 async def create_alert_event(request: CreateAlertEventRequest):
     """
     Create a new alert event. Called by backend ML pipeline.
-    Backend generates: alert_id, created_at
+    Backend generates: alert_id, created_at.
+    After creating the alert, finds eligible devices and populates device_alert,
+    then attempts push notifications and updates delivery status.
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
@@ -607,18 +751,41 @@ async def create_alert_event(request: CreateAlertEventRequest):
 
             print(f"[ALERT] Creating alert: {alert_record}")
 
+            # Step 1: Insert alert_event
             response = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/alert_event",
                 json=alert_record,
                 headers=headers,
             )
 
-            if response.status_code in [200, 201]:
-                print(f"✓ Alert created: {alert_id}")
-                return {"success": True, "alert_id": alert_id, "created_at": now}
-            else:
+            if response.status_code not in [200, 201]:
                 print(f"✗ Failed to create alert: {response.text}")
                 raise HTTPException(status_code=500, detail=f"Failed: {response.text}")
+
+            print(f"✓ Alert created: {alert_id}")
+
+            # Step 2: Find eligible devices near the alert location
+            eligible_devices = await _find_eligible_devices(
+                client, request.latitude, request.longitude
+            )
+
+            # Step 3: Insert device_alert rows as 'pending'
+            device_alert_rows = await _create_device_alert_rows(
+                client, alert_id, eligible_devices
+            )
+
+            # Step 4: Send push notifications and update delivery status
+            if device_alert_rows:
+                await _send_and_update_device_alerts(
+                    client, alert_record, device_alert_rows, eligible_devices
+                )
+
+            return {
+                "success": True,
+                "alert_id": alert_id,
+                "created_at": now,
+                "devices_targeted": len(device_alert_rows),
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -642,13 +809,7 @@ async def get_active_alerts(lat: float | None = None, lon: float | None = None, 
                 alerts = response.json()
                 
                 if lat is not None and lon is not None:
-                    from math import radians, cos, sin, sqrt, atan2
-                    def haversine(lat1, lon1, lat2, lon2):
-                        R = 6371
-                        dlat, dlon = radians(lat2-lat1), radians(lon2-lon1)
-                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-                        return 2 * R * atan2(sqrt(a), sqrt(1-a))
-                    alerts = [a for a in alerts if haversine(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
+                    alerts = [a for a in alerts if haversine_km(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
 
                 return {"alerts": alerts, "count": len(alerts)}
             else:
@@ -700,6 +861,47 @@ async def delete_alert(alert_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============= DEVICE ALERT API =============
+
+@app.get("/device-alerts/{device_id}")
+async def get_device_alerts(device_id: str):
+    """Get all device_alert records for a specific device."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/device_alert?device_id=eq.{device_id}&order=sent_at.desc",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                rows = response.json()
+                return {"device_alerts": rows, "count": len(rows)}
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/device-alerts/by-alert/{alert_id}")
+async def get_alert_delivery_status(alert_id: str):
+    """Get delivery status for all devices targeted by a specific alert."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+            response = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{alert_id}",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                rows = response.json()
+                summary = {
+                    "total": len(rows),
+                    "sent": sum(1 for r in rows if r.get("delivery_status") == "sent"),
+                    "failed": sum(1 for r in rows if r.get("delivery_status") == "failed"),
+                    "pending": sum(1 for r in rows if r.get("delivery_status") == "pending"),
+                }
+                return {"device_alerts": rows, "summary": summary}
 # ============= DEVICE LOCATION API ============
 
 @app.post("/device-location/create")
@@ -842,6 +1044,51 @@ async def get_device_location_by_id(location_id: str):
                 raise HTTPException(status_code=404, detail="Device location not found")
             print(f"✗ FAILED: {response.text}")
             raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/device-alerts/cleanup")
+async def cleanup_old_device_alerts(retention_days: int = 30):
+    """
+    Delete device_alert rows whose associated alert_event expired more than
+    retention_days ago. Default retention: 30 days.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json", "Prefer": "return=representation"}
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Find expired alerts older than cutoff
+            alert_resp = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=lt.{cutoff}&select=alert_id",
+                headers=headers,
+            )
+            if alert_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"Failed to query alerts: {alert_resp.text}")
+
+            expired_alerts = alert_resp.json()
+            if not expired_alerts:
+                return {"success": True, "deleted": 0, "message": "No expired alerts to clean up"}
+
+            expired_ids = [a["alert_id"] for a in expired_alerts]
+
+            # Delete device_alert rows for those expired alerts
+            deleted_count = 0
+            for aid in expired_ids:
+                del_resp = await client.delete(
+                    f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{aid}",
+                    headers=headers,
+                )
+                if del_resp.status_code in [200, 204]:
+                    rows = del_resp.json() if del_resp.text else []
+                    deleted_count += len(rows) if isinstance(rows, list) else 0
+
+            print(f"[CLEANUP] Deleted {deleted_count} device_alert rows (cutoff: {cutoff})")
+            return {"success": True, "deleted": deleted_count, "retention_days": retention_days}
     except HTTPException:
         raise
     except Exception as e:
@@ -1118,4 +1365,4 @@ if __name__ == '__main__':
     reload = os.getenv('DEBUG', 'False') == 'True'
     # Use 0.0.0.0 to accept connections from Android emulator (10.0.2.2)
     uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
-from datetime import datetime
+    
