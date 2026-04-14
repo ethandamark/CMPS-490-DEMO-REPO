@@ -902,6 +902,13 @@ async def get_alert_delivery_status(alert_id: str):
                     "pending": sum(1 for r in rows if r.get("delivery_status") == "pending"),
                 }
                 return {"device_alerts": rows, "summary": summary}
+            raise HTTPException(status_code=500, detail=response.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============= DEVICE LOCATION API ============
 
 @app.post("/device-location/create")
