@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
-    kotlin("kapt")
+    alias(libs.plugins.ksp)
 }
 
 // Apply Google Services plugin only if google-services.json exists
@@ -35,6 +35,11 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
     buildFeatures {
         compose = true
@@ -74,8 +79,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     // Room for local weather cache
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    kapt("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-runtime:2.7.0")
+    implementation("androidx.room:room-ktx:2.7.0")
+    ksp("androidx.room:room-compiler:2.7.0")
 
 }

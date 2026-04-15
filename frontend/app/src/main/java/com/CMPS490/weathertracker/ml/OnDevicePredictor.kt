@@ -23,6 +23,7 @@ private data class ModelMetadata(
     val feature_cols: List<String>,
     val threshold: Double,
     val isotonic_table: List<Map<String, Double>>?,
+    val imputer_fill_values: Map<String, Double>?,
 )
 
 class OnDevicePredictor private constructor(context: Context) {
@@ -45,6 +46,7 @@ class OnDevicePredictor private constructor(context: Context) {
     private val ortEnv: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var ortSession: OrtSession? = null
     private val isotonicTable: List<IsotonicEntry>?
+    private val imputerFills: Map<String, Float>
 
     init {
         val metaJson = context.assets.open(METADATA_FILE).bufferedReader().use { it.readText() }
@@ -56,6 +58,11 @@ class OnDevicePredictor private constructor(context: Context) {
                 cal = entry["cal"]?.toFloat() ?: 0f,
             )
         }
+
+        // Load imputer fill values (median) for missing feature imputation
+        imputerFills = metadata.imputer_fill_values
+            ?.mapValues { it.value.toFloat() }
+            ?: emptyMap()
 
         // Load ONNX session — model.onnx may not exist at build time (only after conversion)
         try {
@@ -71,8 +78,14 @@ class OnDevicePredictor private constructor(context: Context) {
         val session = ortSession
             ?: return PredictionResult(0f, 0, metadata.threshold.toFloat(), metadata.experiment_name)
 
+        // Apply imputation: use the feature value if present, otherwise
+        // fall back to the median fill value from the training set.
         val featureValues = metadata.feature_cols.map { col ->
-            features[col]?.let { if (it.isNaN()) 0f else it } ?: 0f
+            val v = features[col]
+            when {
+                v != null && !v.isNaN() -> v
+                else -> imputerFills[col] ?: 0f
+            }
         }
 
         val floatBuffer = FloatBuffer.wrap(featureValues.toFloatArray())

@@ -53,4 +53,16 @@ interface WeatherCacheDao {
         lonMax: Double,
         fromTime: Long,
     ): List<WeatherCacheEntity>
+
+    @Query(
+        "DELETE FROM weather_cache " +
+        "WHERE latitude BETWEEN :latMin AND :latMax " +
+        "AND longitude BETWEEN :lonMin AND :lonMax"
+    )
+    suspend fun deleteNear(
+        latMin: Double,
+        latMax: Double,
+        lonMin: Double,
+        lonMax: Double,
+    )
 }

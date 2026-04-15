@@ -11,7 +11,7 @@ import androidx.room.RoomDatabase
         OfflineWeatherSnapshotEntity::class,
         HourlyPredictionEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class WeatherDatabase : RoomDatabase() {
@@ -32,7 +32,9 @@ abstract class WeatherDatabase : RoomDatabase() {
                     context.applicationContext,
                     WeatherDatabase::class.java,
                     DB_NAME,
-                ).build().also { instance = it }
+                )
+                .fallbackToDestructiveMigration()
+                .build().also { instance = it }
             }
     }
 }

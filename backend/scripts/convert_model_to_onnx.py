@@ -20,8 +20,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 import joblib
 import numpy as np
+from lib.inference import discover_latest_model
 
-MODEL_PATH = _REPO_ROOT / "lib" / "models" / "baseline_surface_model_3mo_6st.joblib"
 OUT_DIR = _REPO_ROOT / "frontend" / "app" / "src" / "main" / "assets" / "ml"
 ONNX_PATH = OUT_DIR / "model.onnx"
 METADATA_PATH = OUT_DIR / "model_metadata.json"
@@ -29,6 +29,12 @@ METADATA_PATH = OUT_DIR / "model_metadata.json"
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Auto-discover latest model
+    MODEL_PATH = discover_latest_model()
+    if MODEL_PATH is None:
+        print("ERROR: No model bundle found under lib/models/")
+        sys.exit(1)
 
     print(f"Loading model bundle from: {MODEL_PATH}")
     bundle = joblib.load(MODEL_PATH)
@@ -43,23 +49,50 @@ def main() -> None:
     print(f"  threshold       : {threshold}")
     print(f"  feature_cols    : {feature_cols}")
 
-    # ── Convert sklearn pipeline → ONNX ──────────────────────────────
-    try:
-        from skl2onnx import convert_sklearn
-        from skl2onnx.common.data_types import FloatTensorType
+    # ── Convert pipeline to ONNX ────────────────────────────────────
+    # The pipeline is SimpleImputer → XGBClassifier.
+    # We embed the imputer fill-values in model_metadata.json and export
+    # only the XGBClassifier to ONNX (the Kotlin side applies imputation
+    # before feeding the tensor).
+    imputer = None
+    xgb_classifier = None
+    imputer_fill_values: dict[str, float] = {}
 
-        n_features = len(feature_cols)
-        initial_type = [("float_input", FloatTensorType([None, n_features]))]
-        # Opset 17 is the latest opset fully supported by ONNX Runtime 1.17.x on Android.
-        # It covers all operators used by scikit-learn's SimpleImputer and XGBoost pipeline.
-        onnx_model = convert_sklearn(base_model, initial_types=initial_type, target_opset=17)
+    if hasattr(base_model, "steps"):
+        for step_name, step_obj in base_model.steps:
+            step_type = type(step_obj).__name__
+            if "Imputer" in step_type:
+                imputer = step_obj
+            elif "XGB" in step_type or "xgb" in step_type:
+                xgb_classifier = step_obj
 
-        with open(ONNX_PATH, "wb") as f:
-            f.write(onnx_model.SerializeToString())
-        print(f"✓ ONNX model written to: {ONNX_PATH}")
-    except ImportError:
-        print("⚠ skl2onnx not installed — skipping ONNX export (model.onnx not written)")
-        print("  Install with: pip install skl2onnx onnx")
+    # Extract imputer fill values
+    if imputer is not None and hasattr(imputer, "statistics_"):
+        for col, val in zip(feature_cols, imputer.statistics_):
+            imputer_fill_values[col] = float(val)
+        print(f"  Imputer strategy: {imputer.strategy}, extracted {len(imputer_fill_values)} fill values")
+
+    # Export XGBoost model to ONNX
+    if xgb_classifier is not None:
+        try:
+            from onnxmltools.convert import convert_xgboost
+            from onnxmltools.convert.common.data_types import FloatTensorType
+
+            n_features = len(feature_cols)
+            initial_type = [("float_input", FloatTensorType([None, n_features]))]
+            onnx_model = convert_xgboost(
+                xgb_classifier,
+                initial_types=initial_type,
+                target_opset=15,
+            )
+            with open(ONNX_PATH, "wb") as f:
+                f.write(onnx_model.SerializeToString())
+            print(f"✓ ONNX model written to: {ONNX_PATH}")
+            print(f"  File size: {ONNX_PATH.stat().st_size / 1024:.1f} KB")
+        except Exception as exc:
+            print(f"⚠ ONNX export failed ({type(exc).__name__}): {exc}")
+    else:
+        print("⚠ Could not find XGBClassifier step in pipeline")
 
     # ── Export isotonic calibration lookup table ──────────────────────
     iso_table: list[dict] | None = None
@@ -86,6 +119,7 @@ def main() -> None:
         "feature_cols": feature_cols,
         "threshold": threshold,
         "isotonic_table": iso_table,
+        "imputer_fill_values": imputer_fill_values if imputer_fill_values else None,
     }
 
     with open(METADATA_PATH, "w", encoding="utf-8") as f:

@@ -65,6 +65,13 @@ interface BackendApi {
         @Query("since") since: String?,
     ): Call<JsonObject>
 
+    // ===== MODEL INSTANCE =====
+    @POST("devices/{device_id}/model-instance")
+    fun createModelInstance(
+        @Path("device_id") deviceId: String,
+        @Body request: JsonObject,
+    ): Call<JsonObject>
+
     // ===== DEVICE LOCATION =====
     
     /**

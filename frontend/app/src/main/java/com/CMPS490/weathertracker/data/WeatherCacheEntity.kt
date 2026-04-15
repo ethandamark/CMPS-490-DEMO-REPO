@@ -14,12 +14,9 @@ data class WeatherCacheEntity(
     @ColumnInfo(name = "wind_direction") val windDirection: Double?,
     @ColumnInfo(name = "precipitation_amount") val precipitationAmount: Double?,
     @ColumnInfo(name = "pressure") val pressure: Double?,
-    @ColumnInfo(name = "weather_condition") val weatherCondition: String?,
     @ColumnInfo(name = "recorded_at") val recordedAt: Long,
     @ColumnInfo(name = "latitude") val latitude: Double,
     @ColumnInfo(name = "longitude") val longitude: Double,
-    @ColumnInfo(name = "result_level") val resultLevel: String?,
-    @ColumnInfo(name = "result_type") val resultType: String?,
     @ColumnInfo(name = "is_forecast") val isForecast: Boolean = false,
     // ML columns
     @ColumnInfo(name = "dew_point_c") val dewPointC: Double?,

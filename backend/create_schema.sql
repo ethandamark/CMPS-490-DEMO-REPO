@@ -74,12 +74,9 @@ CREATE TABLE weather_cache (
     wind_direction DECIMAL(5,2),
     precipitation_amount DECIMAL(6,2),
     pressure DECIMAL(7,2),
-    weather_condition weather_condition_enum,
     recorded_at TIMESTAMP,
     latitude DECIMAL(9,6),
     longitude DECIMAL(9,6),
-    result_level INT CHECK (result_level BETWEEN 0 AND 5),
-    result_type result_type_enum,
 
     -- ML features (migration 005)
     dew_point_c DOUBLE PRECISION,

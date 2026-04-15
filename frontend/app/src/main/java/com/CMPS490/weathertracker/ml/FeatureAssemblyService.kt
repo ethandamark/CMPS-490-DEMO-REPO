@@ -69,6 +69,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
         // Sort oldest → newest
         val sorted = history.sortedBy { it.recordedAt }
         val current = sorted.last()
+        Log.d(TAG, "📊 Using ${sorted.size} snapshots for prediction (oldest=${sorted.first().recordedAt}, newest=${current.recordedAt})")
 
         // Map DB column names to model feature names
         val tempC = current.temp?.toFloat()
@@ -125,7 +126,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
         val distToCoast = current.distToCoastKm?.toFloat()
             ?: distanceToGulfCoast(latitude, longitude).toFloat()
 
-        return mapOf(
+        val result = mapOf(
             "temp_c" to tempC,
             "pressure_hPa" to pressureHpa,
             "humidity_pct" to humidityPct,
@@ -152,7 +153,22 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
             "longitude" to longitude.toFloat(),
             "elevation" to elevation,
             "dist_to_coast_km" to distToCoast,
+            // NWP features (pass through from DB when available)
+            "nwp_cape_f3_6_max" to current.nwpCapeF36Max?.toFloat(),
+            "nwp_cin_f3_6_max" to current.nwpCinF36Max?.toFloat(),
+            "nwp_pwat_f3_6_max" to current.nwpPwatF36Max?.toFloat(),
+            "nwp_srh03_f3_6_max" to current.nwpSrh03F36Max?.toFloat(),
+            "nwp_li_f3_6_min" to current.nwpLiF36Min?.toFloat(),
+            "nwp_lcl_f3_6_min" to current.nwpLclF36Min?.toFloat(),
+            "nwp_available_leads" to current.nwpAvailableLeads?.toFloat(),
         )
+
+        // Log all feature values for debugging
+        for ((name, value) in result) {
+            Log.d(TAG, "  feature: $name = $value")
+        }
+
+        return result
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

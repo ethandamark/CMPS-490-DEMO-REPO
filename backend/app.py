@@ -971,6 +971,21 @@ class SyncSnapshotsRequest(_BaseModel):
     snapshots: list[SyncSnapshotItem]
 
 
+def _epoch_ms_to_iso(value) -> str | None:
+    """Convert epoch-millisecond long to ISO 8601 string for Postgres TIMESTAMP columns."""
+    if value is None:
+        return None
+    try:
+        ts = float(value)
+        # If the value looks like epoch milliseconds (> year-3000 as seconds), convert
+        if ts > 1e12:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        # Already a string / ISO — pass through
+        return str(value)
+
+
 @app.post("/devices/{device_id}/sync-snapshots")
 async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
     """
@@ -986,9 +1001,13 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
             }
 
             upserted = 0
+            errors = []
             for item in request.snapshots:
-                # Upsert weather_cache row
-                wc = item.weather_cache
+                # Convert epoch-ms timestamps to ISO for Postgres TIMESTAMP columns
+                wc = dict(item.weather_cache)
+                if "recorded_at" in wc:
+                    wc["recorded_at"] = _epoch_ms_to_iso(wc["recorded_at"])
+
                 wc_resp = await client.post(
                     f"{SUPABASE_BASE}/rest/v1/weather_cache",
                     json=wc,
@@ -996,16 +1015,31 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
                 )
                 if wc_resp.status_code in [200, 201]:
                     upserted += 1
+                else:
+                    errors.append(f"weather_cache {wc.get('cache_id')}: {wc_resp.status_code} {wc_resp.text[:200]}")
+                    logger.warning("Failed to upsert weather_cache: %s %s", wc_resp.status_code, wc_resp.text[:300])
 
                 # Upsert offline_weather_snapshot row
                 snap = {**item.offline_snapshot, "device_id": device_id}
-                await client.post(
+                # Always set synced_at to now (server-side timestamp)
+                snap["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                snap_resp = await client.post(
                     f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
                     json=snap,
                     headers=headers,
                 )
+                if snap_resp.status_code not in [200, 201]:
+                    errors.append(f"snapshot {snap.get('offline_weather_id')}: {snap_resp.status_code} {snap_resp.text[:200]}")
+                    logger.warning("Failed to upsert snapshot: %s %s", snap_resp.status_code, snap_resp.text[:300])
+
+            if errors:
+                logger.error("Sync errors for device %s: %s", device_id, errors)
+                raise HTTPException(status_code=502, detail={"sync_errors": errors, "upserted": upserted})
 
             return {"success": True, "upserted": upserted}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error syncing snapshots")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1038,6 +1072,203 @@ async def get_device_snapshots(device_id: str, since: str | None = None):
     except Exception as e:
         logger.exception("Error fetching device snapshots")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============= WEATHER HISTORY SEED =============
+
+class SeedWeatherHistoryRequest(BaseModel):
+    """Seed request — device sends its current coordinates."""
+    latitude: float
+    longitude: float
+
+
+@app.post("/devices/{device_id}/seed-weather-history")
+async def seed_weather_history(device_id: str, request: SeedWeatherHistoryRequest):
+    """
+    Fetch the past 24 hours of hourly weather from Open-Meteo for the
+    device's location, store in Supabase weather_cache + offline_weather_snapshot,
+    and return the rows so the device can seed its local Room DB.
+    """
+    try:
+        latitude = request.latitude
+        longitude = request.longitude
+        print(f"\n{'='*60}")
+        print(f"[SEED] Fetching 24h weather history for device={device_id}")
+        print(f"[SEED] Coordinates: ({latitude}, {longitude})")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Fetch 24h of hourly historical weather from Open-Meteo
+            url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={latitude}&longitude={longitude}"
+                f"&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,"
+                f"precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
+                f"&past_hours=24&forecast_hours=0"
+                f"&timezone=UTC&wind_speed_unit=kmh"
+            )
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                print(f"[SEED] \u2717 Open-Meteo error: {resp.text}")
+                raise HTTPException(status_code=502, detail=f"Open-Meteo error: {resp.text}")
+
+            data = resp.json()
+            elevation = data.get("elevation")
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            temps = hourly.get("temperature_2m", [])
+            humidities = hourly.get("relative_humidity_2m", [])
+            dew_points = hourly.get("dew_point_2m", [])
+            precips = hourly.get("precipitation", [])
+            pressures = hourly.get("pressure_msl", [])
+            winds = hourly.get("wind_speed_10m", [])
+            wind_dirs = hourly.get("wind_direction_10m", [])
+
+            print(f"[SEED] Open-Meteo returned {len(times)} hourly rows")
+
+            # Build weather_cache rows
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation,resolution=merge-duplicates",
+            }
+
+            weather_rows = []
+            for i, time_str in enumerate(times):
+                cache_id = str(uuid.uuid4())
+                # Parse ISO time to epoch millis (Open-Meteo returns UTC)
+                from datetime import datetime as _dt
+                parsed_time = _dt.fromisoformat(time_str).replace(tzinfo=timezone.utc)
+                recorded_at_ms = int(parsed_time.timestamp() * 1000)
+
+                def _safe(lst, idx):
+                    return lst[idx] if idx < len(lst) and lst[idx] is not None else None
+
+                row = {
+                    "cache_id": cache_id,
+                    "temp": _safe(temps, i),
+                    "humidity": _safe(humidities, i),
+                    "wind_speed": _safe(winds, i),
+                    "wind_direction": _safe(wind_dirs, i),
+                    "precipitation_amount": _safe(precips, i),
+                    "pressure": _safe(pressures, i),
+                    "recorded_at": time_str,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "is_forecast": False,
+                    "dew_point_c": _safe(dew_points, i),
+                    "elevation": elevation,
+                    "recorded_at_ms": recorded_at_ms,
+                }
+                weather_rows.append(row)
+
+            # Upsert into Supabase weather_cache
+            if weather_rows:
+                supabase_rows = [
+                    {k: v for k, v in row.items() if k != "recorded_at_ms"}
+                    for row in weather_rows
+                ]
+                cache_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/weather_cache",
+                    json=supabase_rows,
+                    headers=headers,
+                )
+                if cache_resp.status_code in [200, 201]:
+                    print(f"[SEED] \u2713 Stored {len(supabase_rows)} rows in Supabase weather_cache")
+                else:
+                    print(f"[SEED] \u26a0 weather_cache upsert: {cache_resp.status_code} — {cache_resp.text[:200]}")
+
+                # Create offline_weather_snapshot records
+                now = datetime.now(timezone.utc).isoformat()
+                snapshot_rows = [
+                    {
+                        "offline_weather_id": str(uuid.uuid4()),
+                        "device_id": device_id,
+                        "cache_id": row["cache_id"],
+                        "synced_at": now,
+                        "is_current": (i == len(weather_rows) - 1),
+                    }
+                    for i, row in enumerate(weather_rows)
+                ]
+                snap_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                    json=snapshot_rows,
+                    headers=headers,
+                )
+                if snap_resp.status_code in [200, 201]:
+                    print(f"[SEED] \u2713 Stored {len(snapshot_rows)} snapshot links")
+                else:
+                    print(f"[SEED] \u26a0 snapshot upsert: {snap_resp.status_code} — {snap_resp.text[:200]}")
+
+            print(f"[SEED] \u2713 Done — returning {len(weather_rows)} rows to device")
+            return {
+                "success": True,
+                "count": len(weather_rows),
+                "weather_rows": weather_rows,
+                "elevation": elevation,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[SEED] \u2717 Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= MODEL INSTANCE =============
+
+class ModelInstanceRequest(BaseModel):
+    version: str = "v1.0.0"
+    latitude: float
+    longitude: float
+    result_level: int
+    result_type: str = "storm"
+    confidence_score: float
+
+
+@app.post("/devices/{device_id}/model-instance")
+async def create_model_instance(device_id: str, request: ModelInstanceRequest):
+    """
+    Record a model prediction result in the model_instance table.
+    Called by the Android client after each on-device ML prediction.
+    """
+    try:
+        record = {
+            "instance_id": str(uuid.uuid4()),
+            "version": request.version,
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+            "result_level": max(0, min(5, request.result_level)),
+            "result_type": request.result_type,
+            "confidence_score": round(request.confidence_score, 4),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/model_instance",
+                json=record,
+                headers=headers,
+            )
+            if resp.status_code not in [200, 201]:
+                logger.error("model_instance insert failed: %s %s", resp.status_code, resp.text[:300])
+                raise HTTPException(status_code=502, detail=f"Supabase error: {resp.text[:200]}")
+
+        logger.info("model_instance created for device %s: level=%d, confidence=%.4f",
+                     device_id, request.result_level, request.confidence_score)
+        return {"success": True, "instance_id": record["instance_id"]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error creating model_instance")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))

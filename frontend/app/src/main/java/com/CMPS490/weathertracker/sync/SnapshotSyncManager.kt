@@ -122,6 +122,7 @@ class SnapshotSyncWorker(
                 addProperty("temp", item.cache.temp)
                 addProperty("humidity", item.cache.humidity)
                 addProperty("wind_speed", item.cache.windSpeed)
+                addProperty("wind_direction", item.cache.windDirection)
                 addProperty("precipitation_amount", item.cache.precipitationAmount)
                 addProperty("pressure", item.cache.pressure)
                 addProperty("recorded_at", item.cache.recordedAt)
@@ -130,6 +131,15 @@ class SnapshotSyncWorker(
                 addProperty("is_forecast", item.cache.isForecast)
                 addProperty("dew_point_c", item.cache.dewPointC)
                 addProperty("elevation", item.cache.elevation)
+                addProperty("dist_to_coast_km", item.cache.distToCoastKm)
+                addProperty("nwp_cape_f3_6_max", item.cache.nwpCapeF36Max)
+                addProperty("nwp_cin_f3_6_max", item.cache.nwpCinF36Max)
+                addProperty("nwp_pwat_f3_6_max", item.cache.nwpPwatF36Max)
+                addProperty("nwp_srh03_f3_6_max", item.cache.nwpSrh03F36Max)
+                addProperty("nwp_li_f3_6_min", item.cache.nwpLiF36Min)
+                addProperty("nwp_lcl_f3_6_min", item.cache.nwpLclF36Min)
+                addProperty("nwp_available_leads", item.cache.nwpAvailableLeads)
+                addProperty("mrms_max_dbz_75km", item.cache.mrmsMaxDbz75km)
             }
             val snapshotJson = JsonObject().apply {
                 addProperty("offline_weather_id", item.snapshot.offlineWeatherId)
