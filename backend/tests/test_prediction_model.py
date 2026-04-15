@@ -70,6 +70,14 @@ CLEAR_DAY_WEATHER = {
     "longitude": -92.02,
     "elevation": 10.0,
     "dist_to_coast_km": 120.0,
+    # NWP features (calm conditions)
+    "nwp_cape_f3_6_max": 50.0,
+    "nwp_cin_f3_6_max": -120.0,
+    "nwp_pwat_f3_6_max": 15.0,
+    "nwp_srh03_f3_6_max": 20.0,
+    "nwp_li_f3_6_min": 4.0,
+    "nwp_lcl_f3_6_min": 2500.0,
+    "nwp_available_leads": 4.0,
 }
 
 SEVERE_STORM_WEATHER = {
@@ -101,6 +109,14 @@ SEVERE_STORM_WEATHER = {
     "longitude": -92.02,
     "elevation": 10.0,
     "dist_to_coast_km": 120.0,
+    # NWP features (severe storm conditions)
+    "nwp_cape_f3_6_max": 3500.0,
+    "nwp_cin_f3_6_max": -15.0,
+    "nwp_pwat_f3_6_max": 55.0,
+    "nwp_srh03_f3_6_max": 250.0,
+    "nwp_li_f3_6_min": -6.0,
+    "nwp_lcl_f3_6_min": 500.0,
+    "nwp_available_leads": 4.0,
 }
 
 
