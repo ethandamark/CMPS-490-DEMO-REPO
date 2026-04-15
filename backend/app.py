@@ -64,6 +64,17 @@ def generate_alert_token() -> str:
     return str(uuid.uuid4())
 
 
+def empty_alerts_response() -> dict:
+    """
+    Return an empty alert collection when the upstream alerts service is unavailable.
+    This keeps the Android client usable instead of failing the whole screen.
+    """
+    return {
+        "type": "FeatureCollection",
+        "features": []
+    }
+
+
 # ============= REQUEST/RESPONSE MODELS =============
 
 class HealthResponse(BaseModel):
@@ -188,12 +199,13 @@ async def get_alerts(point: str):
                 headers=WEATHER_API_HEADERS
             )
             if response.is_error:
-                raise upstream_error("Alerts", response)
+                body_preview = response.text[:500]
+                print(f"Alerts upstream error for point={point}: {response.status_code} {body_preview}")
+                return empty_alerts_response()
             return response.json()
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Alerts API error: {str(e)}")
+        print(f"Alerts API error for point={point}: {str(e)}")
+        return empty_alerts_response()
 
 
 # ============= RAINVIEWER API PROXY =============

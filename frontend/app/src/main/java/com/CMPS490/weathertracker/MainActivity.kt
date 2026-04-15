@@ -183,6 +183,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 val mapLocation = weatherQueryLocation ?: userLocation
+                val selectedLocationLabel = selectedLocationOption.label
 
                 var currentWeather by remember {
                     mutableStateOf(
@@ -204,6 +205,25 @@ class MainActivity : ComponentActivity() {
                 var activeRequestKey by remember { mutableStateOf("") }
                 var locationName by remember { mutableStateOf("") }
 
+                LaunchedEffect(
+                    selectedLocationOption.useDeviceLocation,
+                    selectedLocationOption.latitude,
+                    selectedLocationOption.longitude
+                ) {
+                    locationName = ""
+                    currentWeather = currentWeather.copy(
+                        location = if (selectedLocationOption.useDeviceLocation) {
+                            "Getting your location..."
+                        } else {
+                            selectedLocationOption.label
+                        },
+                        dayDate = "Loading...",
+                        condition = "Loading weather..."
+                    )
+                    alertWeather = null
+                    forecastWeather = emptyList()
+                }
+
                 // Fetch location name using reverse geocoding
                 LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
                     if (weatherQueryLocation != null) {
@@ -212,25 +232,16 @@ class MainActivity : ComponentActivity() {
                             weatherQueryLocation.latitude,
                             weatherQueryLocation.longitude
                         )
-                        locationName = name
-                        // Update current weather with the geocoded location name
-                        currentWeather = currentWeather.copy(location = name)
+                        locationName = name.takeUnless { it.startsWith("Lat:") }.orEmpty()
+                        if (locationName.isNotEmpty()) {
+                            // Only overwrite the header when geocoding returned a human-readable place name.
+                            currentWeather = currentWeather.copy(location = locationName)
+                        }
                     }
                 }
 
                 LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
                     if (weatherQueryLocation == null) {
-                        currentWeather = currentWeather.copy(
-                            location = if (selectedLocationOption.useDeviceLocation) {
-                                "Getting your location..."
-                            } else {
-                                selectedLocationOption.label
-                            },
-                            dayDate = "Loading...",
-                            condition = "Loading weather..."
-                        )
-                        alertWeather = null
-                        forecastWeather = emptyList()
                         return@LaunchedEffect
                     }
 
@@ -283,9 +294,7 @@ class MainActivity : ComponentActivity() {
                             if (activeRequestKey != requestKey) {
                                 return@getAlerts
                             }
-                            Log.e("MainActivity", "Backend connection error: ${error.message}")
-                            backendConnectionFailed = true
-                            currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
+                            Log.e("MainActivity", "Alerts request failed: ${error.message}")
                             alertWeather = null
                         }
                     )
@@ -330,8 +339,13 @@ class MainActivity : ComponentActivity() {
                                         return@getForecast
                                     }
 
-                                    // Use geocoded location name, or fallback to coordinates
-                                    val locationLabel = if (locationName.isNotEmpty()) locationName else "Lat: $lat, Lon: $lon"
+                                    // Prefer a city/state label from geocoding or the weather point response.
+                                    val pointLocationLabel = buildLocationLabel(point)
+                                    val locationLabel = when {
+                                        locationName.isNotBlank() -> locationName
+                                        pointLocationLabel != "Selected location" -> pointLocationLabel
+                                        else -> selectedLocationLabel
+                                    }
                                     currentWeather = mapCurrentWeather(locationLabel, forecastPeriods)
                                     forecastWeather = mapForecast(forecastPeriods)
 
@@ -386,7 +400,6 @@ class MainActivity : ComponentActivity() {
                                         return@getForecast
                                     }
                                     Log.e("MainActivity", "Forecast error: ${error.message}")
-                                    currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
                                     forecastWeather = emptyList()
                                 }
                             )
@@ -397,7 +410,6 @@ class MainActivity : ComponentActivity() {
                             }
                             Log.e("MainActivity", "Backend connection error: ${error.message}")
                             backendConnectionFailed = true
-                            currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
                             forecastWeather = emptyList()
                         }
                     )

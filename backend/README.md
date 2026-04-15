@@ -20,11 +20,11 @@ This backend provides:
 
 1. Create and activate virtual environment:
 ```bash
-python -m venv venv
+python3 -m venv .venv
 # On Windows
 venv\Scripts\activate
 # On macOS/Linux
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
 2. Install dependencies:
@@ -45,6 +45,16 @@ python app.py
 ```
 
 The server will start on `http://localhost:5000` by default.
+
+Keep this terminal running while you test the Android app. In a second terminal, verify the backend is reachable:
+
+```bash
+cd backend
+source .venv/bin/activate
+curl http://localhost:5000/health
+```
+
+If you are using the Android emulator, the frontend should target `http://10.0.2.2:5000/`. If `/health` is not reachable on your computer, the app will show that it is not connected to the server.
 
 **Interactive API Documentation:**
 - Swagger UI: `http://localhost:5000/docs`
@@ -187,7 +197,7 @@ Place your trained ML model in the `models/` directory. Update `app.py` to:
 
 ```
 backend/
-├── app.py                 # Main Flask application
+├── app.py                 # Main FastAPI application
 ├── requirements.txt       # Python dependencies
 ├── .env.example          # Environment variables template
 ├── models/               # ML models directory (create as needed)
