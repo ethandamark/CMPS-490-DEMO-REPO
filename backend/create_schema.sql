@@ -12,7 +12,6 @@
 -- ── Enum types ─────────────────────────────────────────────────────
 CREATE TYPE status_enum AS ENUM ('active', 'inactive');
 CREATE TYPE platform_enum AS ENUM ('android', 'ios');
-CREATE TYPE weather_condition_enum AS ENUM ('rain', 'clean');
 
 CREATE TYPE alert_type_enum AS ENUM ('storm', 'flood');
 CREATE TYPE delivery_status_enum AS ENUM ('pending', 'sent', 'failed');
