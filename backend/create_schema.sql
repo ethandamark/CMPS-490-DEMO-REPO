@@ -13,7 +13,7 @@
 CREATE TYPE status_enum AS ENUM ('active', 'inactive');
 CREATE TYPE platform_enum AS ENUM ('android', 'ios');
 CREATE TYPE weather_condition_enum AS ENUM ('rain', 'clean');
-CREATE TYPE result_type_enum AS ENUM ('storm', 'flood');
+
 CREATE TYPE alert_type_enum AS ENUM ('storm', 'flood');
 CREATE TYPE delivery_status_enum AS ENUM ('pending', 'sent', 'failed');
 
@@ -109,7 +109,7 @@ CREATE TABLE model_instance (
     latitude DECIMAL(9,6),
     longitude DECIMAL(9,6),
     result_level INT CHECK (result_level BETWEEN 0 AND 5),
-    result_type result_type_enum,
+    result_type TEXT CHECK (result_type IN ('storm', 'clear')),
     confidence_score DECIMAL(5,4),
     created_at TIMESTAMP
 );
