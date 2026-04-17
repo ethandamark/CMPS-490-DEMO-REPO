@@ -50,15 +50,28 @@ interface BackendApi {
     fun getPrediction(@Body request: JsonObject): Call<JsonObject>
     
     // ===== FIREBASE NOTIFICATIONS =====
-    @POST("notifications/register-device")
-    fun registerDeviceToken(@Body request: JsonObject): Call<JsonObject>
-    
-    @POST("notifications/send")
-    fun sendNotification(@Body request: JsonObject): Call<JsonObject>
-    
-    @POST("notifications/weather-alert")
-    fun sendWeatherAlert(@Body request: JsonObject): Call<JsonObject>
-    
+    // (Removed — Firebase/FCM support has been removed)
+
+    // ===== SYNC ENDPOINTS =====
+    @POST("devices/{device_id}/sync-snapshots")
+    fun syncSnapshots(
+        @Path("device_id") deviceId: String,
+        @Body request: JsonObject,
+    ): Call<JsonObject>
+
+    @GET("devices/{device_id}/snapshots")
+    fun getDeviceSnapshots(
+        @Path("device_id") deviceId: String,
+        @Query("since") since: String?,
+    ): Call<JsonObject>
+
+    // ===== MODEL INSTANCE =====
+    @POST("devices/{device_id}/model-instance")
+    fun createModelInstance(
+        @Path("device_id") deviceId: String,
+        @Body request: JsonObject,
+    ): Call<JsonObject>
+
     // ===== DEVICE LOCATION =====
     
     /**

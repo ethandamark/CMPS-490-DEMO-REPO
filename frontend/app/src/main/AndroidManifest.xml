@@ -36,15 +36,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Firebase Cloud Messaging Service -->
-        <service
-            android:name=".WeatherTrackerMessagingService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
-
         <!-- Background Location Tracking Service -->
         <service
             android:name=".LocationTrackingService"
@@ -61,6 +52,28 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Debug receiver to force ML prediction via ADB -->
+        <receiver
+            android:name=".DebugPredictReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.CMPS490.weathertracker.FORCE_PREDICT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Debug activity to force ML prediction via ADB -->
+        <activity
+            android:name=".DebugPredictActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- Storm simulation activity for testing storm notifications -->
+        <activity
+            android:name=".StormSimulationActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
     </application>
 
 </manifest>

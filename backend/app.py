@@ -1,6 +1,17 @@
-﻿"""
-FastAPI backend for Weather Tracker ML predictions + API Proxy
 """
+FastAPI backend for Weather Tracker API Proxy + Supabase operations
+"""
+import sys
+from pathlib import Path
+
+# Add the project root so ``lib`` is importable, and backend/ so
+# lib modules can resolve ``from config import ...``.
+_BACKEND_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_DIR.parent
+for _p in (_BACKEND_DIR, _PROJECT_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,15 +19,17 @@ import os
 from dotenv import load_dotenv
 import uvicorn
 import httpx
-from firebase_notifications import firebase_service
 import uuid
 import secrets
 import string
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+import logging
 from math import radians, cos, sin, sqrt, atan2
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Weather Tracker API", version="1.0.0")
 
@@ -34,10 +47,6 @@ WEATHER_API_BASE = "https://api.weather.gov"
 RAINVIEWER_API_BASE = "https://api.rainviewer.com"
 SUPABASE_BASE = os.getenv("SUPABASE_BASE_URL", "http://localhost:54321")
 SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
-
-# TODO: Import and load your ML prediction model here
-# from models.predictor import WeatherPredictor
-# predictor = WeatherPredictor()
 
 
 # ============= UTILITY FUNCTIONS =============
@@ -58,137 +67,6 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
 
-async def _find_eligible_devices(client: httpx.AsyncClient, lat: float, lon: float, radius_km: float = 50.0) -> list[dict]:
-    """
-    Find devices whose most recent device_location is within radius_km of (lat, lon).
-    Falls back to returning ALL devices with a device_token if no location data exists.
-    """
-    headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
-
-    # Get all devices that have a device_token (needed for push notifications)
-    dev_resp = await client.get(
-        f"{SUPABASE_BASE}/rest/v1/device?device_token=not.is.null&select=device_id,device_token",
-        headers=headers,
-    )
-    if dev_resp.status_code != 200:
-        print(f"[DEVICE_ALERT] Failed to fetch devices: {dev_resp.text}")
-        return []
-
-    devices = dev_resp.json()
-    if not devices:
-        return []
-
-    # Get latest location per device
-    loc_resp = await client.get(
-        f"{SUPABASE_BASE}/rest/v1/device_location?select=device_id,latitude,longitude&order=captured_at.desc",
-        headers=headers,
-    )
-    locations_by_device: dict[str, dict] = {}
-    if loc_resp.status_code == 200:
-        for loc in loc_resp.json():
-            did = loc["device_id"]
-            if did not in locations_by_device:
-                locations_by_device[did] = loc
-
-    eligible: list[dict] = []
-    for dev in devices:
-        did = dev["device_id"]
-        loc = locations_by_device.get(did)
-        if loc:
-            dist = haversine_km(lat, lon, float(loc["latitude"]), float(loc["longitude"]))
-            if dist <= radius_km:
-                eligible.append(dev)
-        else:
-            # No location data — include device (better to over-notify than miss)
-            eligible.append(dev)
-
-    print(f"[DEVICE_ALERT] {len(eligible)} eligible devices out of {len(devices)} total (radius={radius_km}km)")
-    return eligible
-
-
-async def _create_device_alert_rows(client: httpx.AsyncClient, alert_id: str, devices: list[dict]) -> list[dict]:
-    """
-    Bulk-insert device_alert rows with delivery_status='pending' for each eligible device.
-    Returns the created rows.
-    """
-    if not devices:
-        return []
-
-    headers = {
-        "apikey": SUPABASE_API_KEY,
-        "Content-Type": "application/json",
-        "Prefer": "return=representation,resolution=ignore-duplicates",
-    }
-
-    rows = [
-        {
-            "device_alert_id": str(uuid.uuid4()),
-            "device_id": dev["device_id"],
-            "alert_id": alert_id,
-            "delivery_status": "pending",
-            "sent_at": None,
-        }
-        for dev in devices
-    ]
-
-    resp = await client.post(
-        f"{SUPABASE_BASE}/rest/v1/device_alert",
-        json=rows,
-        headers=headers,
-    )
-
-    if resp.status_code in [200, 201]:
-        created = resp.json()
-        print(f"[DEVICE_ALERT] Inserted {len(created)} device_alert rows for alert {alert_id}")
-        return created
-    else:
-        print(f"[DEVICE_ALERT] Failed to insert device_alert rows: {resp.text}")
-        return []
-
-
-async def _send_and_update_device_alerts(client: httpx.AsyncClient, alert_record: dict, device_alert_rows: list[dict], devices: list[dict]):
-    """
-    Attempt to send push notifications for each device_alert row,
-    then update delivery_status to 'sent' or 'failed'.
-    """
-    headers = {
-        "apikey": SUPABASE_API_KEY,
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
-    # Build a device_id -> device_token lookup
-    token_map = {dev["device_id"]: dev["device_token"] for dev in devices}
-
-    title = f"⚠️ {alert_record['alert_type'].title()} Alert (Severity {alert_record['severity_level']})"
-    body = f"A {alert_record['alert_type']} alert has been issued near your area."
-
-    for row in device_alert_rows:
-        device_token = token_map.get(row["device_id"])
-        if not device_token:
-            status = "failed"
-        else:
-            success = firebase_service.send_notification(
-                device_token=device_token,
-                title=title,
-                body=body,
-                data={
-                    "type": "weather_alert",
-                    "alert_id": alert_record["alert_id"],
-                    "alert_type": alert_record["alert_type"],
-                    "severity_level": str(alert_record["severity_level"]),
-                },
-                notification_type="weather",
-            )
-            status = "sent" if success else "failed"
-
-        now = datetime.now(timezone.utc).isoformat()
-        await client.patch(
-            f"{SUPABASE_BASE}/rest/v1/device_alert?device_alert_id=eq.{row['device_alert_id']}",
-            json={"delivery_status": status, "sent_at": now if status == "sent" else None},
-            headers=headers,
-        )
-        print(f"[DEVICE_ALERT] {row['device_alert_id']} -> {status}")
 
 
 # ============= REQUEST/RESPONSE MODELS =============
@@ -211,35 +89,10 @@ class PredictionResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    """Registration request â€” only device-side facts from frontend"""
+    """Registration request - only device-side facts from frontend"""
     locationPermissionStatus: bool = False
-    deviceToken: str | None = None
     latitude: float | None = None
     longitude: float | None = None
-
-class RegisterDeviceTokenRequest(BaseModel):
-    """Register FCM device token"""
-    device_token: str
-    device_id: str
-    alert_token: str | None = None
-    user_id: str | None = None
-
-
-class SendNotificationRequest(BaseModel):
-    """Send notification request"""
-    device_token: str
-    title: str
-    body: str
-    data: dict | None = None
-    notification_type: str = "alert"
-
-
-class WeatherAlertNotificationRequest(BaseModel):
-    """Send weather alert notification"""
-    device_token: str
-    location: str
-    alert_type: str
-    description: str
 
 
 # ============= ALERT EVENT MODELS =============
@@ -370,10 +223,8 @@ async def register_device(request: RegisterRequest):
     Register a new anonymous user + device in one call.
     Backend generates ALL identifiers: anon_user_id, device_id, alert_token.
     Frontend only sends locationPermissionStatus (a device-side fact).
-    FCM device_token is set later via /notifications/register-device.
     """
     try:
-        print(f"\n[REGISTER] Received request: locationPermissionStatus={request.locationPermissionStatus}, deviceToken={'present (' + str(len(request.deviceToken)) + ' chars)' if request.deviceToken else 'NULL'}")
 
         async with httpx.AsyncClient(timeout=30) as client:
             headers = {
@@ -382,86 +233,6 @@ async def register_device(request: RegisterRequest):
                 "Prefer": "return=representation",
             }
 
-            # --- Check if device already exists by FCM token ---
-            if request.deviceToken:
-                existing_response = await client.get(
-                    f"{SUPABASE_BASE}/rest/v1/device?device_token=eq.{request.deviceToken}&select=device_id,anon_user_id,alert_token",
-                    headers=headers,
-                )
-                if existing_response.status_code == 200:
-                    existing = existing_response.json()
-                    if existing:
-                        device = existing[0]
-                        device_id = device['device_id']
-                        print(f"[REGISTER] Existing device found: {device_id}, returning existing credentials")
-                        # Update last_seen_at
-                        now = datetime.now(timezone.utc).isoformat()
-                        await client.patch(
-                            f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device_id}",
-                            json={"last_seen_at": now, "location_permission_status": request.locationPermissionStatus},
-                            headers=headers,
-                        )
-                        
-                        # AUTO-POPULATE DEVICE LOCATION for existing device if permission granted + coords provided
-                        if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
-                            # Check if device_location already exists for this device
-                            existing_loc_response = await client.get(
-                                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{device_id}&order=captured_at.desc&limit=1",
-                                headers=headers,
-                            )
-                            existing_locs = existing_loc_response.json() if existing_loc_response.status_code == 200 else []
-                            
-                            if not existing_locs:
-                                print(f"[REGISTER] Auto-creating device_location for existing device (permission=true, coords provided)")
-                                location_record = {
-                                    "location_id": str(uuid.uuid4()),
-                                    "device_id": device_id,
-                                    "latitude": request.latitude,
-                                    "longitude": request.longitude,
-                                    "captured_at": now,
-                                }
-                                print(f"[REGISTER] location_record: {location_record}")
-                                loc_response = await client.post(
-                                    f"{SUPABASE_BASE}/rest/v1/device_location",
-                                    json=location_record,
-                                    headers=headers,
-                                )
-                                if loc_response.status_code in [200, 201]:
-                                    print(f"✓ Device location auto-created: {location_record['location_id']}")
-                                else:
-                                    print(f"✗ Failed to auto-create device_location: {loc_response.text}")
-                            else:
-                                # Update existing location with new coordinates
-                                existing_loc = existing_locs[0]
-                                location_id = existing_loc["location_id"]
-                                print(f"[REGISTER] Updating existing device_location {location_id} with new coords")
-                                print(f"[REGISTER] Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
-                                print(f"[REGISTER] New: lat={request.latitude}, lon={request.longitude}")
-                                
-                                update_response = await client.patch(
-                                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
-                                    json={
-                                        "latitude": request.latitude,
-                                        "longitude": request.longitude,
-                                        "captured_at": now,
-                                    },
-                                    headers=headers,
-                                )
-                                if update_response.status_code in [200, 204]:
-                                    print(f"✓ Device location updated: {location_id}")
-                                else:
-                                    print(f"✗ Failed to update device_location: {update_response.text}")
-                        else:
-                            print(f"[REGISTER] Skipping device_location for existing device: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
-                        
-                        return {
-                            "success": True,
-                            "userId": device["anon_user_id"],
-                            "deviceId": device_id,
-                            "alertToken": device["alert_token"],
-                        }
-
-            # --- No existing device found, create new ---
             anon_user_id = str(uuid.uuid4())
             device_id = str(uuid.uuid4())
             alert_token = generate_alert_token()
@@ -502,8 +273,6 @@ async def register_device(request: RegisterRequest):
                 "last_seen_at": now,
                 "created_at": now,
             }
-            if request.deviceToken:
-                device_record["device_token"] = request.deviceToken
 
             print(f"[REGISTER] Creating device: {device_record}")
 
@@ -560,170 +329,10 @@ async def register_device(request: RegisterRequest):
 
 # ============= FIREBASE NOTIFICATIONS =============
 
-@app.post("/notifications/register-device")
-async def register_device_token(request: RegisterDeviceTokenRequest):
-    """
-    Register a device FCM token for push notifications.
-    Stores the FCM token as device_token and auto-generates alert_token if not provided.
-    Updates existing device or creates a new device record.
-    Must be called once per device to enable notifications.
-    """
-    # Auto-generate alert_token if not provided
-    alert_token = request.alert_token or generate_alert_token()
-    
-    print(f"\n[REGISTER-DEVICE] Received request:")
-    print(f"  device_id: {request.device_id}")
-    print(f"  device_token: {request.device_token[:20]}...")
-    print(f"  alert_token: {alert_token}")
-    print(f"  Supabase URL: {SUPABASE_BASE}")
-    
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {
-                "apikey": SUPABASE_API_KEY,
-                "Content-Type": "application/json",
-                "Prefer": "return=representation"
-            }
-            
-            # First, try to update existing device by patching device_token and alert_token
-            patch_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}"
-            patch_body = {
-                "device_token": request.device_token,
-                "alert_token": alert_token
-            }
-            
-            print(f"[PATCH] URL: {patch_url}")
-            print(f"[PATCH] Body: {patch_body}")
-            
-            patch_response = await client.patch(
-                patch_url,
-                json=patch_body,
-                headers=headers
-            )
-            
-            print(f"[PATCH] Status: {patch_response.status_code}")
-            print(f"[PATCH] Response: {patch_response.text[:200]}")
-            
-            # Check if PATCH succeeded AND updated rows (response is not empty)
-            patch_data = patch_response.json() if patch_response.text else []
-            if patch_response.status_code in [200, 201, 204] and len(patch_data) > 0:
-                existing_alert_token = patch_data[0].get("alert_token") if patch_data else alert_token
-                print(f"âœ“ Device tokens updated successfully for: {request.device_id}")
-                return {
-                    "success": True,
-                    "message": "FCM token registered successfully",
-                    "device_id": request.device_id,
-                    "alert_token": existing_alert_token,
-                    "token_registered": True
-                }
-            
-            # If PATCH returned empty response or failed, try to INSERT a new device
-            print(f"[POST] PATCH returned no rows or failed, attempting INSERT...")
-            post_url = f"{SUPABASE_BASE}/rest/v1/device"
-            post_body = {
-                "device_id": request.device_id,
-                "device_token": request.device_token,
-                "alert_token": alert_token
-            }
-            
-            post_response = await client.post(
-                post_url,
-                json=post_body,
-                headers=headers
-            )
-            
-            print(f"[POST] Status: {post_response.status_code}")
-            print(f"[POST] Response: {post_response.text[:200]}")
-            
-            if post_response.status_code in [200, 201, 204]:
-                print(f"âœ“ New device created with tokens for: {request.device_id}")
-                return {
-                    "success": True,
-                    "message": "Device created and token registered",
-                    "device_id": request.device_id,
-                    "alert_token": alert_token,
-                    "token_registered": True
-                }
-            else:
-                print(f"âœ— Error creating device: {post_response.text}")
-                return {"success": False, "error": f"Failed to register device: {post_response.text}"}
-    except Exception as e:
-        print(f"âœ— Exception in register_device_token: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error registering device: {str(e)}")
-
-
-@app.post("/notifications/send")
-async def send_notification(request: SendNotificationRequest):
-    """
-    Send a push notification to a device.
-
-    Example payload:
-    {
-        "device_token": "fcm_device_token_here",
-        "title": "Alert Title",
-        "body": "Alert message body",
-        "data": {"key": "value"},
-        "notification_type": "alert"
-    }
-    """
-    try:
-        success = firebase_service.send_notification(
-            device_token=request.device_token,
-            title=request.title,
-            body=request.body,
-            data=request.data,
-            notification_type=request.notification_type
-        )
-
-        return {
-            "success": success,
-            "message": "Notification sent" if success else "Failed to send notification",
-            "device_token": request.device_token
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error sending notification: {str(e)}")
-
-
-@app.post("/notifications/weather-alert")
-async def send_weather_alert(request: WeatherAlertNotificationRequest):
-    """
-    Send a weather alert notification to a device.
-
-    Example payload:
-    {
-        "device_token": "fcm_device_token_here",
-        "location": "Lafayette, Louisiana",
-        "alert_type": "tornado",
-        "description": "Tornado warning in effect until 8:00 PM"
-    }
-    """
-    try:
-        success = firebase_service.send_weather_alert(
-            device_token=request.device_token,
-            location=request.location,
-            alert_type=request.alert_type,
-            description=request.description
-        )
-
-        return {
-            "success": success,
-            "message": "Weather alert sent" if success else "Failed to send alert",
-            "location": request.location,
-            "alert_type": request.alert_type
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error sending weather alert: {str(e)}")
-
-
-# ============= ALERT EVENT API =============
-
 @app.post("/alerts/create")
 async def create_alert_event(request: CreateAlertEventRequest):
     """
     Create a new alert event. Called by backend ML pipeline.
-    Backend generates: alert_id, created_at.
     After creating the alert, finds eligible devices and populates device_alert,
     then attempts push notifications and updates delivery status.
     """
@@ -749,9 +358,9 @@ async def create_alert_event(request: CreateAlertEventRequest):
                 "expires_at": request.expires_at,
             }
 
-            print(f"[ALERT] Creating alert: {alert_record}")
+            logger.info(f"[ALERT] Creating alert: {alert_record}")
 
-            # Step 1: Insert alert_event
+            # Insert alert_event
             response = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/alert_event",
                 json=alert_record,
@@ -759,36 +368,20 @@ async def create_alert_event(request: CreateAlertEventRequest):
             )
 
             if response.status_code not in [200, 201]:
-                print(f"✗ Failed to create alert: {response.text}")
+                logger.error(f"✗ Failed to create alert: {response.text}")
                 raise HTTPException(status_code=500, detail=f"Failed: {response.text}")
 
-            print(f"✓ Alert created: {alert_id}")
-
-            # Step 2: Find eligible devices near the alert location
-            eligible_devices = await _find_eligible_devices(
-                client, request.latitude, request.longitude
-            )
-
-            # Step 3: Insert device_alert rows as 'pending'
-            device_alert_rows = await _create_device_alert_rows(
-                client, alert_id, eligible_devices
-            )
-
-            # Step 4: Send push notifications and update delivery status
-            if device_alert_rows:
-                await _send_and_update_device_alerts(
-                    client, alert_record, device_alert_rows, eligible_devices
-                )
+            logger.info(f"✓ Alert created: {alert_id}")
 
             return {
                 "success": True,
                 "alert_id": alert_id,
                 "created_at": now,
-                "devices_targeted": len(device_alert_rows),
             }
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Error creating alert")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -809,7 +402,13 @@ async def get_active_alerts(lat: float | None = None, lon: float | None = None, 
                 alerts = response.json()
                 
                 if lat is not None and lon is not None:
-                    alerts = [a for a in alerts if haversine_km(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
+                    from math import radians, cos, sin, sqrt, atan2
+                    def haversine(lat1, lon1, lat2, lon2):
+                        R = 6371
+                        dlat, dlon = radians(lat2-lat1), radians(lon2-lon1)
+                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+                        return 2 * R * atan2(sqrt(a), sqrt(1-a))
+                    alerts = [a for a in alerts if haversine(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
 
                 return {"alerts": alerts, "count": len(alerts)}
             else:
@@ -880,6 +479,7 @@ async def get_device_alerts(device_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Error getting device alerts")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -906,6 +506,57 @@ async def get_alert_delivery_status(alert_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Error getting delivery status")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/device-alerts/cleanup")
+async def cleanup_old_device_alerts(retention_days: int = 30):
+    """
+    Delete device_alert rows whose associated alert_event expired more than
+    retention_days ago. Default retention: 30 days.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Find expired alerts older than cutoff
+            alert_resp = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=lt.{cutoff}&select=alert_id",
+                headers=headers,
+            )
+            if alert_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"Failed to query alerts: {alert_resp.text}")
+
+            expired_alerts = alert_resp.json()
+            if not expired_alerts:
+                return {"success": True, "deleted": 0, "message": "No expired alerts to clean up"}
+
+            expired_ids = [a["alert_id"] for a in expired_alerts]
+
+            # Delete device_alert rows for those expired alerts
+            deleted_count = 0
+            for aid in expired_ids:
+                del_resp = await client.delete(
+                    f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{aid}",
+                    headers=headers,
+                )
+                if del_resp.status_code in [200, 204]:
+                    rows = del_resp.json() if del_resp.text else []
+                    deleted_count += len(rows) if isinstance(rows, list) else 0
+
+            logger.info(f"[CLEANUP] Deleted {deleted_count} device_alert rows (cutoff: {cutoff})")
+            return {"success": True, "deleted": deleted_count, "retention_days": retention_days}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error cleaning up device alerts")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1051,51 +702,6 @@ async def get_device_location_by_id(location_id: str):
                 raise HTTPException(status_code=404, detail="Device location not found")
             print(f"✗ FAILED: {response.text}")
             raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/device-alerts/cleanup")
-async def cleanup_old_device_alerts(retention_days: int = 30):
-    """
-    Delete device_alert rows whose associated alert_event expired more than
-    retention_days ago. Default retention: 30 days.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json", "Prefer": "return=representation"}
-
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            # Find expired alerts older than cutoff
-            alert_resp = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=lt.{cutoff}&select=alert_id",
-                headers=headers,
-            )
-            if alert_resp.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Failed to query alerts: {alert_resp.text}")
-
-            expired_alerts = alert_resp.json()
-            if not expired_alerts:
-                return {"success": True, "deleted": 0, "message": "No expired alerts to clean up"}
-
-            expired_ids = [a["alert_id"] for a in expired_alerts]
-
-            # Delete device_alert rows for those expired alerts
-            deleted_count = 0
-            for aid in expired_ids:
-                del_resp = await client.delete(
-                    f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{aid}",
-                    headers=headers,
-                )
-                if del_resp.status_code in [200, 204]:
-                    rows = del_resp.json() if del_resp.text else []
-                    deleted_count += len(rows) if isinstance(rows, list) else 0
-
-            print(f"[CLEANUP] Deleted {deleted_count} device_alert rows (cutoff: {cutoff})")
-            return {"success": True, "deleted": deleted_count, "retention_days": retention_days}
     except HTTPException:
         raise
     except Exception as e:
@@ -1350,21 +956,318 @@ async def update_current_device_location(request: CreateDeviceLocationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============= ML PREDICTION ENDPOINT =============
 
-@app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest):
+
+# ============= SYNC ENDPOINTS =============
+
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional
+
+class SyncSnapshotItem(_BaseModel):
+    weather_cache: dict
+    offline_snapshot: dict
+
+class SyncSnapshotsRequest(_BaseModel):
+    snapshots: list[SyncSnapshotItem]
+
+
+def _epoch_ms_to_iso(value) -> str | None:
+    """Convert epoch-millisecond long to ISO 8601 string for Postgres TIMESTAMP columns."""
+    if value is None:
+        return None
+    try:
+        ts = float(value)
+        # If the value looks like epoch milliseconds (> year-3000 as seconds), convert
+        if ts > 1e12:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        # Already a string / ISO — pass through
+        return str(value)
+
+
+@app.post("/devices/{device_id}/sync-snapshots")
+async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
     """
-    Prediction endpoint for ML model.
-    Expected JSON payload should match your model's input requirements.
+    Upsert weather_cache rows then offline_weather_snapshot rows from the client.
+    Returns a success flag.
     """
     try:
-        # TODO: Process input data and call your ML model
-        # prediction = predictor.predict(request.dict())
-        # return {"prediction": prediction}
-        return {"prediction": "ML model not yet integrated"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation,resolution=merge-duplicates",
+            }
+
+            upserted = 0
+            errors = []
+            for item in request.snapshots:
+                # Convert epoch-ms timestamps to ISO for Postgres TIMESTAMP columns
+                wc = dict(item.weather_cache)
+                if "recorded_at" in wc:
+                    wc["recorded_at"] = _epoch_ms_to_iso(wc["recorded_at"])
+
+                wc_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/weather_cache",
+                    json=wc,
+                    headers=headers,
+                )
+                if wc_resp.status_code in [200, 201]:
+                    upserted += 1
+                else:
+                    errors.append(f"weather_cache {wc.get('cache_id')}: {wc_resp.status_code} {wc_resp.text[:200]}")
+                    logger.warning("Failed to upsert weather_cache: %s %s", wc_resp.status_code, wc_resp.text[:300])
+
+                # Upsert offline_weather_snapshot row
+                snap = {**item.offline_snapshot, "device_id": device_id}
+                # Always set synced_at to now (server-side timestamp)
+                snap["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                snap_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                    json=snap,
+                    headers=headers,
+                )
+                if snap_resp.status_code not in [200, 201]:
+                    errors.append(f"snapshot {snap.get('offline_weather_id')}: {snap_resp.status_code} {snap_resp.text[:200]}")
+                    logger.warning("Failed to upsert snapshot: %s %s", snap_resp.status_code, snap_resp.text[:300])
+
+            if errors:
+                logger.error("Sync errors for device %s: %s", device_id, errors)
+                raise HTTPException(status_code=502, detail={"sync_errors": errors, "upserted": upserted})
+
+            return {"success": True, "upserted": upserted}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"prediction": f"Error: {str(e)}"}
+        logger.exception("Error syncing snapshots")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/devices/{device_id}/snapshots")
+async def get_device_snapshots(device_id: str, since: str | None = None):
+    """
+    Return offline_weather_snapshot rows joined with weather_cache for this device.
+    Optionally filter by recorded_at >= since (ISO 8601).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
+
+            snapshot_url = (
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
+                f"?device_id=eq.{device_id}&select=*,weather_cache(*)"
+                f"&order=weather_cache(recorded_at).desc&limit=168"
+            )
+            if since:
+                snapshot_url += f"&weather_cache.recorded_at=gte.{since}"
+
+            resp = await client.get(snapshot_url, headers=headers)
+            if resp.status_code == 200:
+                return {"success": True, "snapshots": resp.json()}
+            raise HTTPException(status_code=500, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching device snapshots")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============= WEATHER HISTORY SEED =============
+
+class SeedWeatherHistoryRequest(BaseModel):
+    """Seed request — device sends its current coordinates."""
+    latitude: float
+    longitude: float
+
+
+@app.post("/devices/{device_id}/seed-weather-history")
+async def seed_weather_history(device_id: str, request: SeedWeatherHistoryRequest):
+    """
+    Fetch the past 24 hours of hourly weather from Open-Meteo for the
+    device's location, store in Supabase weather_cache + offline_weather_snapshot,
+    and return the rows so the device can seed its local Room DB.
+    """
+    try:
+        latitude = request.latitude
+        longitude = request.longitude
+        print(f"\n{'='*60}")
+        print(f"[SEED] Fetching 24h weather history for device={device_id}")
+        print(f"[SEED] Coordinates: ({latitude}, {longitude})")
+        print(f"{'='*60}")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Fetch 24h of hourly historical weather from Open-Meteo
+            url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={latitude}&longitude={longitude}"
+                f"&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,"
+                f"precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
+                f"&past_hours=24&forecast_hours=0"
+                f"&timezone=UTC&wind_speed_unit=kmh"
+            )
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                print(f"[SEED] \u2717 Open-Meteo error: {resp.text}")
+                raise HTTPException(status_code=502, detail=f"Open-Meteo error: {resp.text}")
+
+            data = resp.json()
+            elevation = data.get("elevation")
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            temps = hourly.get("temperature_2m", [])
+            humidities = hourly.get("relative_humidity_2m", [])
+            dew_points = hourly.get("dew_point_2m", [])
+            precips = hourly.get("precipitation", [])
+            pressures = hourly.get("pressure_msl", [])
+            winds = hourly.get("wind_speed_10m", [])
+            wind_dirs = hourly.get("wind_direction_10m", [])
+
+            print(f"[SEED] Open-Meteo returned {len(times)} hourly rows")
+
+            # Build weather_cache rows
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation,resolution=merge-duplicates",
+            }
+
+            weather_rows = []
+            for i, time_str in enumerate(times):
+                cache_id = str(uuid.uuid4())
+                # Parse ISO time to epoch millis (Open-Meteo returns UTC)
+                from datetime import datetime as _dt
+                parsed_time = _dt.fromisoformat(time_str).replace(tzinfo=timezone.utc)
+                recorded_at_ms = int(parsed_time.timestamp() * 1000)
+
+                def _safe(lst, idx):
+                    return lst[idx] if idx < len(lst) and lst[idx] is not None else None
+
+                row = {
+                    "cache_id": cache_id,
+                    "temp": _safe(temps, i),
+                    "humidity": _safe(humidities, i),
+                    "wind_speed": _safe(winds, i),
+                    "wind_direction": _safe(wind_dirs, i),
+                    "precipitation_amount": _safe(precips, i),
+                    "pressure": _safe(pressures, i),
+                    "recorded_at": time_str,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "is_forecast": False,
+                    "dew_point_c": _safe(dew_points, i),
+                    "elevation": elevation,
+                    "recorded_at_ms": recorded_at_ms,
+                }
+                weather_rows.append(row)
+
+            # Upsert into Supabase weather_cache
+            if weather_rows:
+                supabase_rows = [
+                    {k: v for k, v in row.items() if k != "recorded_at_ms"}
+                    for row in weather_rows
+                ]
+                cache_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/weather_cache",
+                    json=supabase_rows,
+                    headers=headers,
+                )
+                if cache_resp.status_code in [200, 201]:
+                    print(f"[SEED] \u2713 Stored {len(supabase_rows)} rows in Supabase weather_cache")
+                else:
+                    print(f"[SEED] \u26a0 weather_cache upsert: {cache_resp.status_code} — {cache_resp.text[:200]}")
+
+                # Create offline_weather_snapshot records
+                now = datetime.now(timezone.utc).isoformat()
+                snapshot_rows = [
+                    {
+                        "offline_weather_id": str(uuid.uuid4()),
+                        "device_id": device_id,
+                        "cache_id": row["cache_id"],
+                        "synced_at": now,
+                        "is_current": (i == len(weather_rows) - 1),
+                    }
+                    for i, row in enumerate(weather_rows)
+                ]
+                snap_resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                    json=snapshot_rows,
+                    headers=headers,
+                )
+                if snap_resp.status_code in [200, 201]:
+                    print(f"[SEED] \u2713 Stored {len(snapshot_rows)} snapshot links")
+                else:
+                    print(f"[SEED] \u26a0 snapshot upsert: {snap_resp.status_code} — {snap_resp.text[:200]}")
+
+            print(f"[SEED] \u2713 Done — returning {len(weather_rows)} rows to device")
+            return {
+                "success": True,
+                "count": len(weather_rows),
+                "weather_rows": weather_rows,
+                "elevation": elevation,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[SEED] \u2717 Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= MODEL INSTANCE =============
+
+class ModelInstanceRequest(BaseModel):
+    version: str = "v1.0.0"
+    latitude: float
+    longitude: float
+    result_level: int
+    result_type: str = "storm"
+    confidence_score: float
+
+
+@app.post("/devices/{device_id}/model-instance")
+async def create_model_instance(device_id: str, request: ModelInstanceRequest):
+    """
+    Record a model prediction result in the model_instance table.
+    Called by the Android client after each on-device ML prediction.
+    """
+    try:
+        record = {
+            "instance_id": str(uuid.uuid4()),
+            "version": request.version,
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+            "result_level": max(0, min(5, request.result_level)),
+            "result_type": request.result_type,
+            "confidence_score": round(request.confidence_score, 4),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            }
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/model_instance",
+                json=record,
+                headers=headers,
+            )
+            if resp.status_code not in [200, 201]:
+                logger.error("model_instance insert failed: %s %s", resp.status_code, resp.text[:300])
+                raise HTTPException(status_code=502, detail=f"Supabase error: {resp.text[:200]}")
+
+        logger.info("model_instance created for device %s: level=%d, confidence=%.4f",
+                     device_id, request.result_level, request.confidence_score)
+        return {"success": True, "instance_id": record["instance_id"]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error creating model_instance")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == '__main__':
@@ -1372,4 +1275,3 @@ if __name__ == '__main__':
     reload = os.getenv('DEBUG', 'False') == 'True'
     # Use 0.0.0.0 to accept connections from Android emulator (10.0.2.2)
     uvicorn.run(app, host='0.0.0.0', port=port, reload=reload)
-    

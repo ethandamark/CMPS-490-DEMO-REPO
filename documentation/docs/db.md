@@ -42,7 +42,6 @@
 | `status_enum` | 'active', 'inactive' |
 | `platform_enum` | 'android', 'ios' |
 | `weather_condition_enum` | 'rain', 'clean' |
-| `result_type_enum` | 'storm', 'flood' |
 | `alert_type_enum` | 'storm', 'flood' |
 | `delivery_status_enum` | 'pending', 'sent', 'failed' |
 
@@ -97,7 +96,7 @@
 | `latitude` | DECIMAL(9,6) | |
 | `longitude` | DECIMAL(9,6) | |
 | `result_level` | INT | CHECK 0-5 |
-| `result_type` | result_type_enum | |
+| `result_type` | TEXT | CHECK IN ('storm', 'clear') |
 
 #### 5. model_instance
 
@@ -108,7 +107,7 @@
 | `latitude` | DECIMAL(9,6) | |
 | `longitude` | DECIMAL(9,6) | |
 | `result_level` | INT | CHECK 0-5 |
-| `result_type` | result_type_enum | |
+| `result_type` | TEXT | CHECK IN ('storm', 'clear') |
 | `confidence_score` | DECIMAL(5,4) | |
 | `created_at` | TIMESTAMP | |
 
