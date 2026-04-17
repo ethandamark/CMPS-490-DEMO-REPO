@@ -135,7 +135,8 @@ CREATE TABLE device_alert (
     device_id UUID REFERENCES device(device_id),
     alert_id UUID REFERENCES alert_event(alert_id),
     delivery_status delivery_status_enum,
-    sent_at TIMESTAMP
+    sent_at TIMESTAMP,
+    UNIQUE (device_id, alert_id)
 );
 
 --------------------------------------------------
