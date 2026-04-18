@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -33,6 +34,7 @@ import com.google.android.gms.maps.model.TileOverlay
 import com.google.android.gms.maps.model.TileOverlayOptions
 import com.google.android.gms.maps.model.UrlTileProvider
 import com.google.maps.android.compose.*
+import kotlinx.coroutines.delay
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -241,7 +243,49 @@ fun LocationSelectorCard(
     onSaveCurrentLocation: () -> Unit
 ) {
     val palette = WeatherTrackerThemeState.palette
+    val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<LocationOptionUiModel>>(emptyList()) }
+    var isSearching by remember { mutableStateOf(false) }
+    val localMatches = remember(locationOptions, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isEmpty()) {
+            locationOptions
+        } else {
+            locationOptions.filter { option ->
+                option.label.contains(query, ignoreCase = true)
+            }
+        }
+    }
+    val filteredLocationOptions = remember(localMatches, searchResults, searchQuery) {
+        if (searchQuery.isBlank()) {
+            localMatches
+        } else {
+            (localMatches + searchResults)
+                .distinctBy { "${it.label}|${it.latitude}|${it.longitude}|${it.useDeviceLocation}" }
+        }
+    }
+
+    LaunchedEffect(searchQuery, expanded) {
+        if (!expanded) {
+            isSearching = false
+            searchResults = emptyList()
+            return@LaunchedEffect
+        }
+
+        val query = searchQuery.trim()
+        if (query.isBlank()) {
+            isSearching = false
+            searchResults = emptyList()
+            return@LaunchedEffect
+        }
+
+        isSearching = true
+        delay(250)
+        searchResults = GeocodingHelper.searchLocations(context, query)
+        isSearching = false
+    }
 
     Surface(
         color = palette.locationCardBackground,
@@ -259,7 +303,10 @@ fun LocationSelectorCard(
             Spacer(modifier = Modifier.height(10.dp))
             Box {
                 OutlinedButton(
-                    onClick = { expanded = true },
+                    onClick = {
+                        searchQuery = ""
+                        expanded = true
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = palette.selectorBackground,
@@ -271,17 +318,48 @@ fun LocationSelectorCard(
                 }
                 DropdownMenu(
                     expanded = expanded,
-                    onDismissRequest = { expanded = false },
+                    onDismissRequest = {
+                        expanded = false
+                        searchQuery = ""
+                    },
                     modifier = Modifier.fillMaxWidth(0.92f)
                 ) {
-                    locationOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option.label) },
-                            onClick = {
-                                onLocationSelected(option)
-                                expanded = false
-                            }
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        singleLine = true,
+                        label = { Text("Search cities or states") }
+                    )
+                    if (isSearching) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                    } else if (filteredLocationOptions.isEmpty()) {
+                        Text(
+                            text = "No matching locations",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = palette.mutedText,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
                         )
+                    } else {
+                        filteredLocationOptions.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label) },
+                                onClick = {
+                                    onLocationSelected(option)
+                                    expanded = false
+                                    searchQuery = ""
+                                }
+                            )
+                        }
                     }
                 }
             }

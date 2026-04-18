@@ -48,6 +48,54 @@ object GeocodingHelper {
     }
 
     /**
+     * Search for U.S. locations by name and return location options usable by the dropdown.
+     */
+    suspend fun searchLocations(
+        context: Context,
+        query: String,
+        maxResults: Int = 8,
+    ): List<LocationOptionUiModel> {
+        val normalizedQuery = query.trim()
+        if (normalizedQuery.isBlank()) return emptyList()
+
+        return withContext(Dispatchers.IO) {
+            try {
+                if (!Geocoder.isPresent()) {
+                    Log.w("GeocodingHelper", "Geocoder not available for forward search")
+                    return@withContext emptyList()
+                }
+
+                val geocoder = Geocoder(context)
+                val addresses = try {
+                    @Suppress("DEPRECATION")
+                    geocoder.getFromLocationName("$normalizedQuery, USA", maxResults) ?: emptyList()
+                } catch (e: Exception) {
+                    Log.e("GeocodingHelper", "Location search error: ${e.message}")
+                    return@withContext emptyList()
+                }
+
+                addresses
+                    .asSequence()
+                    .filter { it.hasLatitude() && it.hasLongitude() }
+                    .mapNotNull { address ->
+                        val label = formatSearchAddress(address) ?: return@mapNotNull null
+                        LocationOptionUiModel(
+                            label = label,
+                            latitude = address.latitude,
+                            longitude = address.longitude,
+                            useDeviceLocation = false,
+                        )
+                    }
+                    .distinctBy { "${it.label}|${it.latitude}|${it.longitude}" }
+                    .toList()
+            } catch (e: Exception) {
+                Log.e("GeocodingHelper", "Unexpected location search error: ${e.message}", e)
+                emptyList()
+            }
+        }
+    }
+
+    /**
      * Format address object to "City, State" format
      */
     private fun formatAddress(address: Address): String {
@@ -58,6 +106,20 @@ object GeocodingHelper {
             "$city, $state"
         } else {
             city
+        }
+    }
+
+    private fun formatSearchAddress(address: Address): String? {
+        val city = address.locality
+            ?: address.subAdminArea
+            ?: address.featureName
+        val state = address.adminArea
+
+        return when {
+            !city.isNullOrBlank() && !state.isNullOrBlank() -> "$city, $state"
+            !state.isNullOrBlank() -> state
+            !city.isNullOrBlank() -> city
+            else -> null
         }
     }
 
