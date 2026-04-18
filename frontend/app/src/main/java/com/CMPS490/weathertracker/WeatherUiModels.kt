@@ -29,12 +29,8 @@ data class DailyForecastUiModel(
     val highTemp: Int,
     val lowTemp: Int,
     val precipitationChance: Int,
-    val uvIndex: String,
-    val humidity: Int,
     val windText: String,
     val feelsLike: Int,
-    val sunrise: String,
-    val sunset: String,
     val isToday: Boolean = false
 )
 
