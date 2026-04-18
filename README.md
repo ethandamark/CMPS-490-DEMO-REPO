@@ -14,10 +14,10 @@ A comprehensive weather tracking and risk analysis application with integrated m
 │   └── gradle.properties    # Gradle properties
 │
 ├── backend/                 # Python backend with ML model integration
-│   ├── app.py              # Flask API server
+│   ├── app.py              # FastAPI server
 │   ├── requirements.txt     # Python dependencies
 │   ├── .env.example        # Environment variables template
-│   ├── venv/               # Python virtual environment
+│   ├── .venv/              # Python virtual environment (macOS/Linux)
 │   ├── models/             # ML models directory
 │   ├── supabase/           # Supabase configuration
 │   ├── *.sql               # Database initialization scripts
@@ -41,12 +41,25 @@ cd frontend
 
 ```bash
 cd backend
-.\venv\Scripts\activate  # On Windows
-source venv/bin/activate  # On macOS/Linux
+# On Windows
+.\venv\Scripts\activate
+
+# On macOS/Linux
+source .venv/bin/activate
 python app.py
 ```
 
 The API will be available at `http://localhost:5000`
+
+Keep that terminal open while the backend is running. Open a second terminal to verify it:
+
+```bash
+cd backend
+source .venv/bin/activate
+curl http://localhost:5000/health
+```
+
+If the Android emulator is running the frontend, it connects to the backend through `http://10.0.2.2:5000/`, so the backend must already be running on your computer before the app can load weather data.
 
 ## Backend API Endpoints
 
@@ -68,7 +81,7 @@ cp .env.example .env
 ## Technologies
 
 - **Frontend**: Android, Kotlin, Jetpack Compose, Google Maps API, Retrofit
-- **Backend**: Flask, Python
+- **Backend**: FastAPI, Python
 - **ML Libraries**: scikit-learn, pandas, numpy
 - **Database**: Supabase PostgreSQL
 - **Weather APIs**: RainViewer, OpenWeather

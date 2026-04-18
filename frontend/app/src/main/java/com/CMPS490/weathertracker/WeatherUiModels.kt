@@ -9,7 +9,10 @@ data class CurrentWeatherUiModel(
     val temperature: Int,
     val condition: String,
     val highTemp: Int,
-    val lowTemp: Int
+    val lowTemp: Int,
+    val weatherType: WeatherType = WeatherType.PartlyCloudy,
+    val isDaytime: Boolean = true,
+    val precipitationChance: Int = 0
 )
 
 @Immutable

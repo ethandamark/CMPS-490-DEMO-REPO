@@ -47,9 +47,24 @@ WEATHER_API_BASE = "https://api.weather.gov"
 RAINVIEWER_API_BASE = "https://api.rainviewer.com"
 SUPABASE_BASE = os.getenv("SUPABASE_BASE_URL", "http://localhost:54321")
 SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
+WEATHER_API_HEADERS = {
+    "User-Agent": os.getenv("WEATHER_API_USER_AGENT", "CMPS490WeatherTracker/1.0 (contact: dev@example.com)"),
+    "Accept": "application/geo+json, application/json",
+}
 
 
 # ============= UTILITY FUNCTIONS =============
+
+def upstream_error(service_name: str, response: httpx.Response) -> HTTPException:
+    """
+    Convert an upstream HTTP error into a FastAPI HTTPException while preserving
+    the upstream status code for the Android client.
+    """
+    body_preview = response.text[:500]
+    return HTTPException(
+        status_code=response.status_code,
+        detail=f"{service_name} upstream error: {body_preview}"
+    )
 
 def generate_alert_token() -> str:
     """
@@ -67,6 +82,15 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
 
+def empty_alerts_response() -> dict:
+    """
+    Return an empty alert collection when the upstream alerts service is unavailable.
+    This keeps the Android client usable instead of failing the whole screen.
+    """
+    return {
+        "type": "FeatureCollection",
+        "features": []
+    }
 
 
 # ============= REQUEST/RESPONSE MODELS =============
@@ -164,10 +188,17 @@ async def get_weather_points(lat: float, lon: float):
     Corresponds to: GET https://api.weather.gov/points/{lat},{lon}
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(f"{WEATHER_API_BASE}/points/{lat},{lon}")
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(
+                f"{WEATHER_API_BASE}/points/{lat},{lon}",
+                headers=WEATHER_API_HEADERS
+            )
+            if response.is_error:
+                raise upstream_error("Weather points", response)
             return response.json()
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Weather API error: {str(e)}")
 
 
@@ -178,10 +209,14 @@ async def get_forecast(url: str):
     Corresponds to: GET from forecast URL
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers=WEATHER_API_HEADERS)
+            if response.is_error:
+                raise upstream_error("Forecast", response)
             return response.json()
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Forecast API error: {str(e)}")
 
 
@@ -192,11 +227,20 @@ async def get_alerts(point: str):
     Corresponds to: GET https://api.weather.gov/alerts/active?point={point}
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(f"{WEATHER_API_BASE}/alerts/active", params={"point": point})
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(
+                f"{WEATHER_API_BASE}/alerts/active",
+                params={"point": point},
+                headers=WEATHER_API_HEADERS
+            )
+            if response.is_error:
+                body_preview = response.text[:500]
+                print(f"Alerts upstream error for point={point}: {response.status_code} {body_preview}")
+                return empty_alerts_response()
             return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Alerts API error: {str(e)}")
+        print(f"Alerts API error for point={point}: {str(e)}")
+        return empty_alerts_response()
 
 
 # ============= RAINVIEWER API PROXY =============

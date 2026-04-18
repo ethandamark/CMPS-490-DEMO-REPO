@@ -35,6 +35,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,6 +46,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
+import com.CMPS490.weathertracker.ui.theme.AppThemeMode
 import com.CMPS490.weathertracker.network.AlertFeature
 import com.CMPS490.weathertracker.network.AlertsResponse
 import com.CMPS490.weathertracker.network.ForecastPeriod
@@ -60,6 +62,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
+import com.google.gson.Gson
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -98,6 +101,7 @@ import kotlinx.coroutines.launch
 private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
 private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
 private const val RADAR_PLAYBACK_TICK_MS = 1500L
+private val gson = Gson()
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalPermissionsApi::class)
@@ -106,7 +110,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            WeatherTrackerTheme {
+            var themeMode by rememberSaveable { mutableStateOf(AppThemeMode.Dark) }
+            WeatherTrackerTheme(themeMode = themeMode) {
                 val navController = rememberNavController()
                 val context = LocalContext.current
                 val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -400,6 +405,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 val mapLocation = weatherQueryLocation ?: userLocation
+                val selectedLocationLabel = selectedLocationOption.label
 
                 var currentWeather by remember {
                     mutableStateOf(
@@ -409,7 +415,10 @@ class MainActivity : ComponentActivity() {
                             temperature = 0,
                             condition = "Loading weather...",
                             highTemp = 0,
-                            lowTemp = 0
+                            lowTemp = 0,
+                            weatherType = WeatherType.PartlyCloudy,
+                            isDaytime = true,
+                            precipitationChance = 0
                         )
                     )
                 }
@@ -446,6 +455,25 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                LaunchedEffect(
+                    selectedLocationOption.useDeviceLocation,
+                    selectedLocationOption.latitude,
+                    selectedLocationOption.longitude
+                ) {
+                    locationName = ""
+                    currentWeather = currentWeather.copy(
+                        location = if (selectedLocationOption.useDeviceLocation) {
+                            "Getting your location..."
+                        } else {
+                            selectedLocationOption.label
+                        },
+                        dayDate = "Loading...",
+                        condition = "Loading weather..."
+                    )
+                    alertWeather = null
+                    forecastWeather = emptyList()
+                }
+
                 // Fetch location name using reverse geocoding
                 LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
                     if (weatherQueryLocation != null) {
@@ -454,25 +482,16 @@ class MainActivity : ComponentActivity() {
                             weatherQueryLocation.latitude,
                             weatherQueryLocation.longitude
                         )
-                        locationName = name
-                        // Update current weather with the geocoded location name
-                        currentWeather = currentWeather.copy(location = name)
+                        locationName = name.takeUnless { it.startsWith("Lat:") }.orEmpty()
+                        if (locationName.isNotEmpty()) {
+                            // Only overwrite the header when geocoding returned a human-readable place name.
+                            currentWeather = currentWeather.copy(location = locationName)
+                        }
                     }
                 }
 
                 LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
                     if (weatherQueryLocation == null) {
-                        currentWeather = currentWeather.copy(
-                            location = if (selectedLocationOption.useDeviceLocation) {
-                                "Getting your location..."
-                            } else {
-                                selectedLocationOption.label
-                            },
-                            dayDate = "Loading...",
-                            condition = "Loading weather..."
-                        )
-                        alertWeather = null
-                        forecastWeather = emptyList()
                         return@LaunchedEffect
                     }
 
@@ -525,9 +544,7 @@ class MainActivity : ComponentActivity() {
                             if (activeRequestKey != requestKey) {
                                 return@getAlerts
                             }
-                            Log.e("MainActivity", "Backend connection error: ${error.message}")
-                            backendConnectionFailed = true
-                            currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
+                            Log.e("MainActivity", "Alerts request failed: ${error.message}")
                             alertWeather = null
                         }
                     )
@@ -538,11 +555,16 @@ class MainActivity : ComponentActivity() {
                             if (activeRequestKey != requestKey) {
                                 return@getWeatherPoints
                             }
-                            val point = response
-                            val forecastUrl = point.getAsJsonObject("properties")?.get("forecast")?.asString
-                            val forecastHourlyUrl = point.getAsJsonObject("properties")?.get("forecastHourly")?.asString
+                            val point = runCatching {
+                                gson.fromJson(response, PointResponse::class.java)
+                            }.onFailure { error ->
+                                Log.e("MainActivity", "Failed to parse point response: ${error.message}. Raw body: $response", error)
+                            }.getOrNull()
+                            val forecastUrl = point?.properties?.forecast
+                            val forecastHourlyUrl = point?.properties?.forecastHourly
                             
                             if (forecastUrl == null) {
+                                Log.e("MainActivity", "Point response missing forecast URL. Raw body: $response")
                                 currentWeather = currentWeather.copy(condition = "No forecast available")
                                 forecastWeather = emptyList()
                                 return@getWeatherPoints
@@ -554,32 +576,25 @@ class MainActivity : ComponentActivity() {
                                     if (activeRequestKey != requestKey) {
                                         return@getForecast
                                     }
-                                    val periods = forecastResponse.getAsJsonObject("properties")?.getAsJsonArray("periods")?.map { it.asJsonObject } ?: emptyList()
-                                    if (periods.isEmpty()) {
+                                    val forecast = runCatching {
+                                        gson.fromJson(forecastResponse, ForecastResponse::class.java)
+                                    }.onFailure { error ->
+                                        Log.e("MainActivity", "Failed to parse forecast response: ${error.message}. Raw body: $forecastResponse", error)
+                                    }.getOrNull()
+                                    val forecastPeriods = forecast?.properties?.periods.orEmpty()
+                                    if (forecastPeriods.isEmpty()) {
+                                        Log.e("MainActivity", "Forecast response missing periods. Raw body: $forecastResponse")
                                         currentWeather = currentWeather.copy(condition = "No forecast available")
                                         forecastWeather = emptyList()
                                         return@getForecast
                                     }
 
-                                    // Use geocoded location name, or fallback to coordinates
-                                    val locationLabel = if (locationName.isNotEmpty()) locationName else "Lat: $lat, Lon: $lon"
-                                    val forecastPeriods = periods.map { it.asJsonObject }.map { periodObj ->
-                                        ForecastPeriod(
-                                            name = periodObj.get("name")?.asString ?: "",
-                                            startTime = periodObj.get("startTime")?.asString ?: "",
-                                            isDaytime = periodObj.get("isDaytime")?.asBoolean ?: true,
-                                            temperature = periodObj.get("temperature")?.asInt ?: 0,
-                                            temperatureUnit = periodObj.get("temperatureUnit")?.asString ?: "F",
-                                            windSpeed = periodObj.get("windSpeed")?.asString ?: "",
-                                            shortForecast = periodObj.get("shortForecast")?.asString ?: "",
-                                            detailedForecast = periodObj.get("detailedForecast")?.asString ?: "",
-                                            probabilityOfPrecipitation = periodObj.getAsJsonObject("probabilityOfPrecipitation")?.let { 
-                                                QuantitativeValue(it.get("value")?.asDouble) 
-                                            },
-                                            relativeHumidity = periodObj.getAsJsonObject("relativeHumidity")?.let { 
-                                                QuantitativeValue(it.get("value")?.asDouble) 
-                                            }
-                                        )
+                                    // Prefer a city/state label from geocoding or the weather point response.
+                                    val pointLocationLabel = buildLocationLabel(point)
+                                    val locationLabel = when {
+                                        locationName.isNotBlank() -> locationName
+                                        pointLocationLabel != "Selected location" -> pointLocationLabel
+                                        else -> selectedLocationLabel
                                     }
                                     currentWeather = mapCurrentWeather(locationLabel, forecastPeriods)
                                     forecastWeather = mapForecast(forecastPeriods)
@@ -598,12 +613,19 @@ class MainActivity : ComponentActivity() {
                                                 if (activeRequestKey != requestKey) {
                                                     return@getForecast
                                                 }
-                                                val hourlyPeriods = hourlyResponse.getAsJsonObject("properties")?.getAsJsonArray("periods")?.map { it.asJsonObject } ?: emptyList()
-                                                val hourlyNow = hourlyPeriods.firstOrNull()
+                                                val hourlyForecast = runCatching {
+                                                    gson.fromJson(hourlyResponse, ForecastResponse::class.java)
+                                                }.onFailure { error ->
+                                                    Log.e("MainActivity", "Failed to parse hourly forecast response: ${error.message}. Raw body: $hourlyResponse", error)
+                                                }.getOrNull()
+                                                val hourlyNow = hourlyForecast?.properties?.periods?.firstOrNull()
                                                 if (hourlyNow != null) {
                                                     currentWeather = currentWeather.copy(
-                                                        temperature = hourlyNow.get("temperature")?.asInt ?: 0,
-                                                        condition = hourlyNow.get("shortForecast")?.asString ?: ""
+                                                        temperature = hourlyNow.temperature,
+                                                        condition = hourlyNow.shortForecast,
+                                                        weatherType = toWeatherType(hourlyNow.shortForecast),
+                                                        isDaytime = hourlyNow.isDaytime,
+                                                        precipitationChance = hourlyNow.probabilityOfPrecipitation?.value?.toInt() ?: 0
                                                     )
                                                     WeatherApiCache.put(
                                                         lat = lat,
@@ -628,7 +650,6 @@ class MainActivity : ComponentActivity() {
                                         return@getForecast
                                     }
                                     Log.e("MainActivity", "Forecast error: ${error.message}")
-                                    currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
                                     forecastWeather = emptyList()
                                 }
                             )
@@ -639,7 +660,6 @@ class MainActivity : ComponentActivity() {
                             }
                             Log.e("MainActivity", "Backend connection error: ${error.message}")
                             backendConnectionFailed = true
-                            currentWeather = currentWeather.copy(condition = "Application is not connected to the server")
                             forecastWeather = emptyList()
                         }
                     )
@@ -652,8 +672,10 @@ class MainActivity : ComponentActivity() {
                             alert = alertWeather,
                             forecast = forecastWeather,
                             userLocation = mapLocation,
+                            themeMode = themeMode,
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
+                            onThemeModeChanged = { themeMode = it },
                             onLocationSelected = { selectedLocationOption = it },
                             onLiveRadarClick = { navController.navigate("map_screen") },
                             stormRiskTimeline = stormRiskTimeline,
@@ -696,13 +718,18 @@ private fun mapCurrentWeather(
     val firstPeriod = periods.first()
     val dateLabel = formatDateLong(firstPeriod.startTime)
     val lowTemp = (firstPeriod.temperature - 8).coerceAtLeast(0)
+    val weatherType = toWeatherType(firstPeriod.shortForecast)
+    val precipitationChance = firstPeriod.probabilityOfPrecipitation?.value?.toInt() ?: 0
     return CurrentWeatherUiModel(
         location = locationLabel,
         dayDate = dateLabel,
         temperature = firstPeriod.temperature,
         condition = firstPeriod.shortForecast,
         highTemp = firstPeriod.temperature,
-        lowTemp = lowTemp
+        lowTemp = lowTemp,
+        weatherType = weatherType,
+        isDaytime = firstPeriod.isDaytime,
+        precipitationChance = precipitationChance
     )
 }
 
