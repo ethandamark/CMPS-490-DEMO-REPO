@@ -35,7 +35,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,7 +45,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
-import com.CMPS490.weathertracker.ui.theme.AppThemeMode
 import com.CMPS490.weathertracker.network.AlertFeature
 import com.CMPS490.weathertracker.network.AlertsResponse
 import com.CMPS490.weathertracker.network.ForecastPeriod
@@ -56,6 +54,7 @@ import com.CMPS490.weathertracker.network.RetrofitInstance
 import com.CMPS490.weathertracker.network.QuantitativeValue
 import com.CMPS490.weathertracker.network.AlertProperties
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.material3.AlertDialog
@@ -74,7 +73,6 @@ import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.model.TileOverlay
 import com.google.android.gms.maps.model.TileOverlayOptions
 import com.google.android.gms.maps.model.UrlTileProvider
-import com.google.firebase.messaging.FirebaseMessaging
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapEffect
@@ -102,6 +100,7 @@ import kotlinx.coroutines.launch
 private const val RADAR_REFRESH_INTERVAL_MS = 5 * 60 * 1000L
 private const val RADAR_PLAYBACK_STEP_SECONDS = 30 * 60L
 private const val RADAR_PLAYBACK_TICK_MS = 1500L
+private const val SAVED_LOCATIONS_PREF_KEY = "saved_locations"
 private val gson = Gson()
 
 class MainActivity : ComponentActivity() {
@@ -111,8 +110,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            var themeMode by rememberSaveable { mutableStateOf(AppThemeMode.Dark) }
-            WeatherTrackerTheme(themeMode = themeMode) {
+            WeatherTrackerTheme {
                 val navController = rememberNavController()
                 val context = LocalContext.current
                 val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -380,7 +378,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val locationOptions = remember {
+                val defaultLocationOptions = remember {
                     listOf(
                         LocationOptionUiModel("Use device location", null, null, true),
                         LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
@@ -391,7 +389,11 @@ class MainActivity : ComponentActivity() {
                         LocationOptionUiModel("Monroe, LA", 32.5093, -92.1193)
                     )
                 }
-                var selectedLocationOption by remember { mutableStateOf(locationOptions[0]) }
+                var savedLocationOptions by remember { mutableStateOf(loadSavedLocationOptions(prefs)) }
+                val locationOptions = remember(savedLocationOptions) {
+                    defaultLocationOptions + savedLocationOptions
+                }
+                var selectedLocationOption by remember { mutableStateOf(defaultLocationOptions[0]) }
 
                 val weatherQueryLocation = when {
                     selectedLocationOption.useDeviceLocation &&
@@ -407,6 +409,13 @@ class MainActivity : ComponentActivity() {
                 }
                 val mapLocation = weatherQueryLocation ?: userLocation
                 val selectedLocationLabel = selectedLocationOption.label
+                val canSaveCurrentLocation = weatherQueryLocation != null &&
+                    savedLocationOptions.none { option ->
+                        option.latitude != null &&
+                            option.longitude != null &&
+                            coordinatesMatch(option.latitude, weatherQueryLocation.latitude) &&
+                            coordinatesMatch(option.longitude, weatherQueryLocation.longitude)
+                    }
 
                 var currentWeather by remember {
                     mutableStateOf(
@@ -428,6 +437,11 @@ class MainActivity : ComponentActivity() {
                 var activeRequestKey by remember { mutableStateOf("") }
                 var locationName by remember { mutableStateOf("") }
                 var stormRiskTimeline by remember { mutableStateOf<List<Pair<Long, Float>>>(emptyList()) }
+                val currentViewLabel = when {
+                    locationName.isNotBlank() -> locationName
+                    !selectedLocationOption.useDeviceLocation -> selectedLocationLabel
+                    else -> ""
+                }
 
                 // Load storm risk timeline from Room DB
                 LaunchedEffect(storedDeviceId) {
@@ -673,11 +687,26 @@ class MainActivity : ComponentActivity() {
                             alert = alertWeather,
                             forecast = forecastWeather,
                             userLocation = mapLocation,
-                            themeMode = themeMode,
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
-                            onThemeModeChanged = { themeMode = it },
                             onLocationSelected = { selectedLocationOption = it },
+                            canSaveCurrentLocation = canSaveCurrentLocation,
+                            onSaveCurrentLocation = {
+                                val locationToSave = weatherQueryLocation ?: return@WeatherOverviewScreen
+                                val baseLabel = currentViewLabel.ifBlank {
+                                    "Saved ${locationToSave.latitude.formatCoordinate()}, ${locationToSave.longitude.formatCoordinate()}"
+                                }
+                                val uniqueLabel = makeUniqueLocationLabel(baseLabel, locationOptions)
+                                val savedOption = LocationOptionUiModel(
+                                    label = uniqueLabel,
+                                    latitude = locationToSave.latitude,
+                                    longitude = locationToSave.longitude,
+                                    useDeviceLocation = false
+                                )
+                                savedLocationOptions = savedLocationOptions + savedOption
+                                persistSavedLocationOptions(prefs, savedLocationOptions)
+                                selectedLocationOption = savedOption
+                            },
                             onLiveRadarClick = { navController.navigate("map_screen") },
                             stormRiskTimeline = stormRiskTimeline,
                         )
@@ -732,36 +761,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun registerFCMToken(deviceId: String) {
-        // Register the Firebase Cloud Messaging token with the backend.
-        // This enables push notifications to this device.
-        try {
-            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                if (task.isSuccessful) {
-                    val fcmToken = task.result
-                    Log.d("MainActivity", "FCM Token obtained: ${fcmToken.take(20)}...")
-                    
-                    // Register token with backend using BackendRepository
-                    BackendRepository.registerDeviceToken(
-                        deviceToken = fcmToken,
-                        deviceId = deviceId,
-                        onSuccess = {
-                            Log.d("MainActivity", "✓ Device token registered with backend")
-                            Log.d("MainActivity", "  Notifications are now enabled for this device")
-                        },
-                        onError = { error ->
-                            Log.e("MainActivity", "✗ Failed to register device token: $error")
-                            Log.d("MainActivity", "  Notifications will not work until token is registered")
-                        }
-                    )
-                } else {
-                    Log.e("MainActivity", "✗ Failed to get FCM token: ${task.exception?.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "✗ Error registering FCM token: ${e.message}", e)
-        }
-    }
 }
 
 private fun mapCurrentWeather(
@@ -1315,12 +1314,6 @@ private fun findSteppedFrameIndex(
     }
 }
 
-/**
- * (Removed — Firebase/FCM support has been removed from this project.)
- */
-private fun registerFCMToken(deviceId: String) {
-    Log.d("MainActivity", "FCM token registration skipped (Firebase removed)")
-
 private fun buildLocationLabel(pointResponse: PointResponse?): String {
     val city = pointResponse?.properties?.relativeLocation?.properties?.city
     val state = pointResponse?.properties?.relativeLocation?.properties?.state
@@ -1330,3 +1323,58 @@ private fun buildLocationLabel(pointResponse: PointResponse?): String {
         "Selected location"
     }
 }
+
+private fun loadSavedLocationOptions(prefs: SharedPreferences): List<LocationOptionUiModel> {
+    val raw = prefs.getString(SAVED_LOCATIONS_PREF_KEY, null) ?: return emptyList()
+    return runCatching {
+        val jsonArray = org.json.JSONArray(raw)
+        buildList {
+            for (index in 0 until jsonArray.length()) {
+                val item = jsonArray.getJSONObject(index)
+                add(
+                    LocationOptionUiModel(
+                        label = item.getString("label"),
+                        latitude = item.getDouble("latitude"),
+                        longitude = item.getDouble("longitude"),
+                        useDeviceLocation = false
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun persistSavedLocationOptions(
+    prefs: SharedPreferences,
+    savedLocations: List<LocationOptionUiModel>
+) {
+    val jsonArray = org.json.JSONArray()
+    savedLocations.forEach { option ->
+        if (option.latitude != null && option.longitude != null && !option.useDeviceLocation) {
+            jsonArray.put(
+                org.json.JSONObject().apply {
+                    put("label", option.label)
+                    put("latitude", option.latitude)
+                    put("longitude", option.longitude)
+                }
+            )
+        }
+    }
+    prefs.edit().putString(SAVED_LOCATIONS_PREF_KEY, jsonArray.toString()).apply()
+}
+
+private fun makeUniqueLocationLabel(
+    baseLabel: String,
+    existingOptions: List<LocationOptionUiModel>
+): String {
+    if (existingOptions.none { it.label == baseLabel }) {
+        return baseLabel
+    }
+    var suffix = 2
+    while (existingOptions.any { it.label == "$baseLabel ($suffix)" }) {
+        suffix += 1
+    }
+    return "$baseLabel ($suffix)"
+}
+
+private fun Double.formatCoordinate(): String = String.format(Locale.US, "%.3f", this)

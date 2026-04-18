@@ -49,65 +49,19 @@ object SupabaseRepository {
     private const val TAG = "SupabaseRepository"
 
     suspend fun createAnonUser(anonUserId: String): Result<Unit> {
-        return try {
-            Log.d(TAG, "→ Attempting to create anonymous user with ID: $anonUserId")
-            val api = SupabaseConfig.getApi()
-            val record = AnonymousUserRecord(
-                anonUserId = anonUserId,
-                status = "active"
-            )
-
-            Log.d(TAG, "  Sending anonymous_user insert request to Supabase...")
-            try {
-                api.createAnonUser(record)
-            } catch (e: Exception) {
-                // Supabase returns empty body on 201 Created - this causes GSON EOF error
-                // But the INSERT actually succeeds, so we can safely ignore this
-                if (e.message?.contains("End of input") == true) {
-                    Log.d(TAG, "✓ Anonymous user created successfully (empty response is expected)")
-                } else {
-                    throw e
-                }
-            }
-            Log.d(TAG, "✓ Anonymous user created successfully: $anonUserId")
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Log.e(TAG, "✗ Failed to create anonymous user: ${e.message}", e)
-            Result.failure(e)
-        }
+        val error = UnsupportedOperationException(
+            "Direct Supabase access is no longer configured. Use BackendRepository.register instead."
+        )
+        Log.e(TAG, "✗ Failed to create anonymous user: ${error.message}")
+        return Result.failure(error)
     }
 
     suspend fun createDevice(deviceId: String, anonUserId: String, locationPermissionStatus: Boolean? = null): Result<Unit> {
-        return try {
-            Log.d(TAG, "→ Attempting to create device with ID: $deviceId")
-            Log.d(TAG, "  Linking to anonymous user: $anonUserId")
-            Log.d(TAG, "  Location permission status: $locationPermissionStatus")
-            val api = SupabaseConfig.getApi()
-            val record = DeviceRecord(
-                deviceId = deviceId,
-                anonUserId = anonUserId,
-                platform = "android",
-                locationPermissionStatus = locationPermissionStatus
-            )
-
-            Log.d(TAG, "  Sending device insert request to Supabase...")
-            try {
-                api.createDevice(record)
-            } catch (e: Exception) {
-                // Supabase returns empty body on 201 Created - this causes GSON EOF error
-                // But the INSERT actually succeeds, so we can safely ignore this
-                if (e.message?.contains("End of input") == true) {
-                    Log.d(TAG, "✓ Device created successfully (empty response is expected)")
-                } else {
-                    throw e
-                }
-            }
-            Log.d(TAG, "✓ Device created successfully: $deviceId linked to user: $anonUserId")
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Log.e(TAG, "✗ Failed to create device: ${e.message}", e)
-            Result.failure(e)
-        }
+        val error = UnsupportedOperationException(
+            "Direct Supabase access is no longer configured. Use BackendRepository.register instead."
+        )
+        Log.e(TAG, "✗ Failed to create device: ${error.message}")
+        return Result.failure(error)
     }
 
     suspend fun updateDevice(
@@ -125,7 +79,7 @@ object SupabaseRepository {
             }
             
             // Call BackendRepository.updateDevice() using suspendCancellableCoroutine
-            suspendCancellableCoroutine { continuation ->
+            suspendCancellableCoroutine<Result<Unit>> { continuation ->
                 BackendRepository.updateDevice(
                     deviceId = deviceId,
                     locationPermissionStatus = locationPermissionStatus,

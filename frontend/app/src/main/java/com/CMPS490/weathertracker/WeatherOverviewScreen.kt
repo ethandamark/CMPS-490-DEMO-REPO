@@ -2,19 +2,11 @@ package com.CMPS490.weathertracker
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -24,20 +16,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.CMPS490.weathertracker.ui.theme.AppThemeMode
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerThemeState
 import com.google.android.gms.maps.model.CameraPosition
@@ -53,16 +39,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
-// Storm probability threshold from model_metadata.json
 private const val STORM_ALERT_THRESHOLD = 0.4901f
-// Storm risk timeline bar height bounds (dp)
 private const val MAX_BAR_HEIGHT_DP = 48f
 private const val MIN_BAR_HEIGHT_DP = 4f
-val NavyDark = Color(0xFF0A1931)
-val NavyLight = Color(0xFF185ABD)
-val CardBackground = Color(0xFF1E2A44).copy(alpha = 0.7f)
-val MutedText = Color(0xFF9EADC8)
-private val AlertGold = Color(0xFFFFD700)
 
 @Composable
 fun WeatherOverviewScreen(
@@ -70,19 +49,21 @@ fun WeatherOverviewScreen(
     alert: WeatherAlertUiModel?,
     forecast: List<DailyForecastUiModel>,
     userLocation: LatLng?,
-    themeMode: AppThemeMode,
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
-    onThemeModeChanged: (AppThemeMode) -> Unit,
     onLocationSelected: (LocationOptionUiModel) -> Unit,
+    canSaveCurrentLocation: Boolean,
+    onSaveCurrentLocation: () -> Unit,
     onLiveRadarClick: () -> Unit,
     stormRiskTimeline: List<Pair<Long, Float>> = emptyList(),
 ) {
     val palette = WeatherTrackerThemeState.palette
+    val visualStyle = weatherVisualStyleFor(currentWeather, hasSevereAlert = alert != null)
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
     ) {
-        WeatherDynamicBackground(weather = currentWeather)
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -92,16 +73,19 @@ fun WeatherOverviewScreen(
         ) {
             item {
                 LocationSelectorCard(
-                    themeMode = themeMode,
                     locationOptions = locationOptions,
                     selectedLocationOption = selectedLocationOption,
-                    onThemeModeChanged = onThemeModeChanged,
-                    onLocationSelected = onLocationSelected
+                    onLocationSelected = onLocationSelected,
+                    canSaveCurrentLocation = canSaveCurrentLocation,
+                    onSaveCurrentLocation = onSaveCurrentLocation
                 )
             }
 
             item {
-                WeatherHeaderSection(currentWeather)
+                WeatherHeaderCard(
+                    weather = currentWeather,
+                    visualStyle = visualStyle,
+                )
             }
 
             if (alert != null) {
@@ -124,8 +108,14 @@ fun WeatherOverviewScreen(
                 )
             }
 
-            items(forecast) { day ->
-                ForecastRow(day)
+            if (forecast.isEmpty()) {
+                item {
+                    ForecastUnavailableCard()
+                }
+            } else {
+                items(forecast) { day ->
+                    ForecastRow(day)
+                }
             }
 
             item {
@@ -142,288 +132,29 @@ fun WeatherOverviewScreen(
 }
 
 @Composable
-private fun WeatherDynamicBackground(weather: CurrentWeatherUiModel) {
+private fun ForecastUnavailableCard() {
     val palette = WeatherTrackerThemeState.palette
-    val isHighContrast = WeatherTrackerThemeState.mode == AppThemeMode.HighContrast
-    val transition = rememberInfiniteTransition(label = "weather_scene")
-    val cloudShift by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 18000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "cloud_shift"
-    )
-    val rainOffset by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rain_offset"
-    )
-    val starPulse by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.95f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "star_pulse"
-    )
-    val hazeShift by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 26000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "haze_shift"
-    )
-
-    val topColor = when {
-        isHighContrast -> palette.backgroundTopNight
-        weather.isDaytime && weather.weatherType == WeatherType.Stormy -> Color(0xFF324057)
-        weather.isDaytime && weather.weatherType == WeatherType.Rainy -> Color(0xFF466887)
-        weather.isDaytime && weather.weatherType == WeatherType.Cloudy -> Color(0xFF5B6E8A)
-        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> palette.backgroundTopDay
-        weather.isDaytime -> Color(0xFF6DAEEA)
-        weather.weatherType == WeatherType.Stormy -> Color(0xFF0D142A)
-        weather.weatherType == WeatherType.Rainy -> Color(0xFF11233E)
-        weather.weatherType == WeatherType.Cloudy -> Color(0xFF182744)
-        else -> palette.backgroundTopNight
-    }
-    val bottomColor = when {
-        isHighContrast -> palette.backgroundBottomNight
-        weather.isDaytime && weather.weatherType == WeatherType.Sunny -> palette.backgroundBottomDay
-        weather.isDaytime && weather.weatherType == WeatherType.PartlyCloudy -> Color(0xFF3D74C7)
-        weather.isDaytime -> Color(0xFF234F9E)
-        weather.weatherType == WeatherType.Rainy -> Color(0xFF163A69)
-        weather.weatherType == WeatherType.Stormy -> Color(0xFF0F1A35)
-        else -> palette.backgroundBottomNight
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(brush = Brush.verticalGradient(colors = listOf(topColor, bottomColor)))
+    Surface(
+        color = palette.cardBackground.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()
     ) {
-        AtmosphericWash(weather = weather, hazeShift = hazeShift)
-        if (weather.isDaytime) {
-            DaylightOrb(weather)
-        } else {
-            NightSky(starPulse = starPulse)
-        }
-
-        CloudLayer(
-            weather = weather,
-            cloudShift = cloudShift,
-            modifier = Modifier.fillMaxSize()
-        )
-
-        if (weather.weatherType == WeatherType.Rainy || weather.weatherType == WeatherType.Stormy) {
-            RainLayer(
-                intensity = if (weather.weatherType == WeatherType.Stormy) 1f else 0.65f,
-                rainOffset = rainOffset,
-                modifier = Modifier.fillMaxSize()
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "Forecast unavailable for this location",
+                style = MaterialTheme.typography.titleSmall,
+                color = palette.primaryText,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Weather data for this point did not load. Try another nearby pin or refresh after a moment.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = palette.mutedText
             )
         }
-
-        if (weather.weatherType == WeatherType.Stormy) {
-            LightningAccent(modifier = Modifier.fillMaxSize())
-        }
-    }
-}
-
-@Composable
-private fun AtmosphericWash(weather: CurrentWeatherUiModel, hazeShift: Float) {
-    val palette = WeatherTrackerThemeState.palette
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val warmHorizon = if (weather.isDaytime) Color(0x55FFDDA1) else Color(0x220F234A)
-        val coolMist = when (weather.weatherType) {
-            WeatherType.Rainy -> Color(0x334E6D8A)
-            WeatherType.Stormy -> Color(0x22465A74)
-            else -> palette.mistTint
-        }
-        drawRect(
-            brush = Brush.verticalGradient(
-                colors = listOf(Color.Transparent, coolMist, warmHorizon),
-                startY = size.height * 0.18f,
-                endY = size.height
-            ),
-            size = size
-        )
-
-        val bandY = size.height * (0.62f + (0.04f * hazeShift))
-        drawOval(
-            brush = Brush.radialGradient(
-                colors = listOf(warmHorizon, Color.Transparent),
-                center = Offset(size.width * 0.5f, bandY),
-                radius = size.width * 0.72f
-            ),
-            topLeft = Offset(-size.width * 0.1f, bandY - 180f),
-            size = Size(size.width * 1.2f, 360f)
-        )
-    }
-}
-
-@Composable
-private fun DaylightOrb(weather: CurrentWeatherUiModel) {
-    val palette = WeatherTrackerThemeState.palette
-    val orbColor = if (weather.weatherType == WeatherType.Sunny) palette.sunGlow else Color(0xFFFFF4D8)
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val center = Offset(size.width * 0.16f, size.height * 0.14f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(orbColor.copy(alpha = 0.34f), Color.Transparent),
-                center = center,
-                radius = size.width * 0.28f
-            ),
-            radius = size.width * 0.28f,
-            center = center
-        )
-        if (weather.weatherType == WeatherType.Sunny || weather.weatherType == WeatherType.PartlyCloudy) {
-            drawCircle(
-                color = orbColor.copy(alpha = 0.92f),
-                radius = size.width * 0.05f,
-                center = center
-            )
-        }
-    }
-}
-
-@Composable
-private fun NightSky(starPulse: Float) {
-    val stars = remember {
-        listOf(
-            0.12f to 0.12f, 0.22f to 0.19f, 0.34f to 0.09f, 0.47f to 0.16f,
-            0.58f to 0.11f, 0.69f to 0.21f, 0.81f to 0.13f, 0.90f to 0.19f,
-            0.16f to 0.29f, 0.31f to 0.25f, 0.72f to 0.31f, 0.86f to 0.27f
-        )
-    }
-
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val moonCenter = Offset(size.width * 0.17f, size.height * 0.16f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(Color(0x33E7EEFF), Color.Transparent),
-                center = moonCenter,
-                radius = size.width * 0.16f
-            ),
-            radius = size.width * 0.16f,
-            center = moonCenter
-        )
-        drawCircle(
-            color = Color(0xFFF0F4FF),
-            radius = size.width * 0.04f,
-            center = moonCenter
-        )
-        drawCircle(
-            color = Color(0xFFB7C3DF),
-            radius = size.width * 0.04f,
-            center = Offset(moonCenter.x + size.width * 0.018f, moonCenter.y - size.width * 0.008f)
-        )
-
-        stars.forEachIndexed { index, (xFraction, yFraction) ->
-            val radius = if (index % 3 == 0) 2.8f else 1.6f
-            drawCircle(
-                color = Color.White.copy(alpha = if (index % 2 == 0) starPulse * 0.65f else 0.34f),
-                radius = radius,
-                center = Offset(size.width * xFraction, size.height * yFraction)
-            )
-        }
-    }
-}
-
-@Composable
-private fun CloudLayer(
-    weather: CurrentWeatherUiModel,
-    cloudShift: Float,
-    modifier: Modifier = Modifier
-) {
-    val mode = WeatherTrackerThemeState.mode
-    val cloudColor = when {
-        mode == AppThemeMode.HighContrast -> Color.White.copy(alpha = 0.22f)
-        weather.weatherType == WeatherType.Stormy -> Color(0xAA3B4B5E)
-        weather.weatherType == WeatherType.Rainy -> Color(0x885D738B)
-        weather.isDaytime -> Color(0x66F3F6FA)
-        else -> Color(0x55687A97)
-    }
-    val secondaryCloudColor = cloudColor.copy(alpha = cloudColor.alpha * 0.7f)
-
-    Canvas(modifier = modifier) {
-        val travel = size.width * 0.18f
-        val drift = cloudShift * travel
-        val cloudBaseY = if (weather.isDaytime) size.height * 0.2f else size.height * 0.24f
-
-        fun drawCloudBank(centerX: Float, centerY: Float, width: Float, height: Float, color: Color) {
-            drawOval(
-                brush = Brush.radialGradient(
-                    colors = listOf(color, color.copy(alpha = 0.08f), Color.Transparent),
-                    center = Offset(centerX, centerY),
-                    radius = width * 0.6f
-                ),
-                topLeft = Offset(centerX - width / 2f, centerY - height / 2f),
-                size = Size(width, height)
-            )
-        }
-
-        if (weather.weatherType != WeatherType.Sunny || !weather.isDaytime) {
-            drawCloudBank(size.width * 0.24f + drift, cloudBaseY, size.width * 0.44f, size.height * 0.12f, cloudColor)
-        }
-
-        if (weather.weatherType == WeatherType.Cloudy || weather.weatherType == WeatherType.Rainy || weather.weatherType == WeatherType.Stormy || !weather.isDaytime) {
-            drawCloudBank(size.width * 0.72f - drift, cloudBaseY + size.height * 0.03f, size.width * 0.54f, size.height * 0.15f, secondaryCloudColor)
-        }
-
-        if (weather.weatherType == WeatherType.Stormy || weather.weatherType == WeatherType.Cloudy) {
-            drawCloudBank(size.width * 0.48f + drift * 0.55f, cloudBaseY + size.height * 0.08f, size.width * 0.6f, size.height * 0.16f, cloudColor.copy(alpha = 0.72f))
-        }
-    }
-}
-
-@Composable
-private fun RainLayer(
-    intensity: Float,
-    rainOffset: Float,
-    modifier: Modifier = Modifier
-) {
-    val palette = WeatherTrackerThemeState.palette
-    Canvas(modifier = modifier) {
-        val columns = 20
-        val streakLength = size.height * 0.08f
-        for (index in 0 until columns) {
-            val x = size.width * ((index + 0.5f) / columns.toFloat())
-            val laneOffset = (index % 5) * 0.13f
-            val progress = ((rainOffset + laneOffset) % 1f)
-            val yStart = progress * (size.height + streakLength) - streakLength
-            drawLine(
-                color = palette.rainTint.copy(alpha = 0.14f + (0.22f * intensity)),
-                start = Offset(x, yStart),
-                end = Offset(x - 16f, yStart + streakLength),
-                strokeWidth = if (index % 3 == 0) 2.6f else 1.6f,
-                cap = StrokeCap.Round
-            )
-        }
-    }
-}
-
-@Composable
-private fun LightningAccent(modifier: Modifier = Modifier) {
-    val palette = WeatherTrackerThemeState.palette
-    Canvas(modifier = modifier) {
-        val path = Path().apply {
-            moveTo(size.width * 0.82f, size.height * 0.16f)
-            lineTo(size.width * 0.77f, size.height * 0.28f)
-            lineTo(size.width * 0.82f, size.height * 0.29f)
-            lineTo(size.width * 0.75f, size.height * 0.42f)
-            lineTo(size.width * 0.79f, size.height * 0.33f)
-            lineTo(size.width * 0.74f, size.height * 0.33f)
-            close()
-        }
-        drawPath(color = palette.stormFlash.copy(alpha = 0.14f), path = path)
     }
 }
 
@@ -444,8 +175,9 @@ fun RadarAttributionFooter() {
 @Composable
 fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
     val hourFormat = SimpleDateFormat("ha", Locale.US)
+    val palette = WeatherTrackerThemeState.palette
     Surface(
-        color = CardBackground,
+        color = palette.cardBackground,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -453,7 +185,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
             Text(
                 text = "STORM RISK TIMELINE",
                 style = MaterialTheme.typography.labelMedium,
-                color = MutedText,
+                color = palette.mutedText,
                 letterSpacing = 1.5.sp,
                 fontWeight = FontWeight.Bold,
             )
@@ -464,7 +196,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
             ) {
                 timeline.takeLast(24).forEach { (timestamp, probability) ->
                     val isAlert = probability >= STORM_ALERT_THRESHOLD
-                    val barColor = if (isAlert) AlertGold else NavyLight
+                    val barColor = if (isAlert) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                     val barHeight = (probability * MAX_BAR_HEIGHT_DP).coerceAtLeast(MIN_BAR_HEIGHT_DP)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -481,7 +213,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                         Text(
                             text = hourFormat.format(Date(timestamp)),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MutedText,
+                            color = palette.mutedText,
                             fontSize = 8.sp,
                             textAlign = TextAlign.Center,
                         )
@@ -492,7 +224,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
             Text(
                 text = "Yellow bars indicate storm risk above threshold",
                 style = MaterialTheme.typography.labelSmall,
-                color = MutedText,
+                color = palette.mutedText,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -502,11 +234,11 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
 
 @Composable
 fun LocationSelectorCard(
-    themeMode: AppThemeMode,
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
-    onThemeModeChanged: (AppThemeMode) -> Unit,
-    onLocationSelected: (LocationOptionUiModel) -> Unit
+    onLocationSelected: (LocationOptionUiModel) -> Unit,
+    canSaveCurrentLocation: Boolean,
+    onSaveCurrentLocation: () -> Unit
 ) {
     val palette = WeatherTrackerThemeState.palette
     var expanded by remember { mutableStateOf(false) }
@@ -554,69 +286,103 @@ fun LocationSelectorCard(
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Theme",
-                style = MaterialTheme.typography.labelMedium,
-                color = palette.mutedText,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(
+            OutlinedButton(
+                onClick = onSaveCurrentLocation,
+                enabled = canSaveCurrentLocation,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = palette.selectorBackground,
+                    contentColor = palette.selectorContent,
+                    disabledContainerColor = palette.selectorBackground.copy(alpha = 0.55f),
+                    disabledContentColor = palette.mutedText
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, palette.outline)
             ) {
-                AppThemeMode.entries.forEach { option ->
-                    FilterChip(
-                        selected = themeMode == option,
-                        onClick = { onThemeModeChanged(option) },
-                        label = { Text(option.label()) },
-                        modifier = Modifier.weight(1f),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primary,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
-                            containerColor = palette.selectorBackground,
-                            labelColor = palette.selectorContent
-                        )
-                    )
-                }
+                Text(if (canSaveCurrentLocation) "Save Current Location" else "Location Already Saved")
             }
         }
     }
 }
 
 @Composable
-fun WeatherHeaderSection(weather: CurrentWeatherUiModel) {
+fun WeatherHeaderCard(
+    weather: CurrentWeatherUiModel,
+    visualStyle: WeatherVisualStyle,
+) {
     val palette = WeatherTrackerThemeState.palette
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = weather.location,
-            style = MaterialTheme.typography.headlineSmall,
-            color = palette.primaryText,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = weather.dayDate,
-            style = MaterialTheme.typography.bodyMedium,
-            color = palette.mutedText
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "${weather.temperature}°",
-            style = MaterialTheme.typography.displayLarge.copy(fontSize = 100.sp),
-            color = palette.primaryText,
-            fontWeight = FontWeight.Thin
-        )
-        Text(
-            text = weather.condition,
-            style = MaterialTheme.typography.titleLarge,
-            color = palette.primaryText
-        )
-        Text(
-            text = "H:${weather.highTemp}° L:${weather.lowTemp}°",
-            style = MaterialTheme.typography.bodyLarge,
-            color = palette.primaryText
-        )
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(24.dp),
+        tonalElevation = 2.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .background(
+                    brush = Brush.verticalGradient(visualStyle.gradientColors),
+                )
+                .fillMaxWidth()
+                .padding(24.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(120.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(visualStyle.accentTint.copy(alpha = visualStyle.overlayAlpha))
+            )
+            Column(
+                horizontalAlignment = Alignment.Start,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Icon(
+                            imageVector = visualStyle.icon,
+                            contentDescription = null,
+                            tint = visualStyle.accentTint,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = weather.location,
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = palette.primaryText,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = weather.dayDate,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = palette.mutedText
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    text = "${weather.temperature}°",
+                    style = MaterialTheme.typography.displayLarge.copy(fontSize = 88.sp),
+                    color = palette.primaryText,
+                    fontWeight = FontWeight.Light
+                )
+                Text(
+                    text = weather.condition,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = palette.primaryText
+                )
+                Text(
+                    text = "H:${weather.highTemp}°  L:${weather.lowTemp}°",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = palette.secondaryText
+                )
+            }
+        }
     }
 }
 
@@ -632,7 +398,7 @@ fun WeatherAlertCard(alert: WeatherAlertUiModel) {
         isWarning -> Color(0xFFFF7A7A)
         isWatch -> Color(0xFFFFB74D)
         isAdvisory -> Color(0xFFFFE082)
-        else -> AlertGold
+        else -> MaterialTheme.colorScheme.tertiary
     }
     val cardColor = when {
         isWarning -> Color(0xFF5A1E26).copy(alpha = 0.72f)
@@ -813,7 +579,7 @@ fun LiveRadarCard(userLocation: LatLng?, onClick: () -> Unit) {
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                colors = listOf(palette.backgroundTopNight, palette.cardBackground)
+                                colors = listOf(MaterialTheme.colorScheme.surfaceVariant, palette.cardBackground)
                             )
                         )
                 )
@@ -962,12 +728,6 @@ fun DetailItem(label: String, value: String, modifier: Modifier = Modifier) {
     }
 }
 
-private fun AppThemeMode.label(): String = when (this) {
-    AppThemeMode.Light -> "Light"
-    AppThemeMode.Dark -> "Dark"
-    AppThemeMode.HighContrast -> "Contrast"
-}
-
 private fun getWeatherIcon(type: WeatherType): ImageVector {
     return when (type) {
         WeatherType.Sunny -> Icons.Default.Brightness5
@@ -1008,15 +768,15 @@ fun PreviewWeatherOverview() {
             alert = mockAlert,
             forecast = mockForecast,
             userLocation = LatLng(30.2241, -92.0198),
-            themeMode = AppThemeMode.Dark,
             locationOptions = listOf(
                 LocationOptionUiModel("Use device location", null, null, true),
                 LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
                 LocationOptionUiModel("Lafayette, LA", 30.2241, -92.0198)
             ),
             selectedLocationOption = LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
-            onThemeModeChanged = {},
             onLocationSelected = {},
+            canSaveCurrentLocation = true,
+            onSaveCurrentLocation = {},
             onLiveRadarClick = {}
         )
     }

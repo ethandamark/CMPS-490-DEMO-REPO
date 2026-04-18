@@ -899,8 +899,6 @@ async def get_latest_device_location(device_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/device-location/update-current")
-async def update_current_device_location(request: CreateDeviceLocationRequest):
 @app.patch("/supabase/device")
 async def update_device(request: DeviceUpdateRequest):
     """
