@@ -180,6 +180,47 @@ object BackendRepository {
         }
     }
     
+    /**
+     * Update device via backend proxy
+     */
+    fun updateDevice(
+        deviceId: String,
+        locationPermissionStatus: Boolean? = null,
+        lastSeenAt: String? = null,
+        onSuccess: () -> Unit,
+        onError: (Exception) -> Unit
+    ) {
+        try {
+            Log.d(TAG, "→ Updating device: $deviceId via backend")
+            val record = JsonObject().apply {
+                addProperty("device_id", deviceId)
+                locationPermissionStatus?.let { addProperty("location_permission_status", it) }
+                lastSeenAt?.let { addProperty("last_seen_at", it) }
+            }
+            
+            val call = api.updateDevice(record)
+            call.enqueue(object : Callback<JsonObject> {
+                override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "✓ Device updated successfully: $deviceId")
+                        onSuccess()
+                    } else {
+                        Log.e(TAG, "✗ Device update error: ${response.code()}")
+                        onError(Exception("HTTP ${response.code()}: ${response.message()}"))
+                    }
+                }
+                
+                override fun onFailure(call: Call<JsonObject>, t: Throwable) {
+                    Log.e(TAG, "✗ Device update failure: ${t.message}", t)
+                    onError(t as Exception)
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "✗ Error updating device: ${e.message}", e)
+            onError(e)
+        }
+    }
+    
     
     // ===== ML PREDICTION =====
     

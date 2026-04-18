@@ -74,6 +74,7 @@ import com.google.android.gms.maps.model.MapStyleOptions
 import com.google.android.gms.maps.model.TileOverlay
 import com.google.android.gms.maps.model.TileOverlayOptions
 import com.google.android.gms.maps.model.UrlTileProvider
+import com.google.firebase.messaging.FirebaseMessaging
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapEffect
@@ -699,15 +700,67 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-}
 
-private fun buildLocationLabel(pointResponse: PointResponse?): String {
-    val city = pointResponse?.properties?.relativeLocation?.properties?.city
-    val state = pointResponse?.properties?.relativeLocation?.properties?.state
-    return if (!city.isNullOrBlank() && !state.isNullOrBlank()) {
-        "$city, $state"
-    } else {
-        "Selected location"
+    override fun onPause() {
+        super.onPause()
+        Log.d("MainActivity", "→ App paused - updating last_seen_at timestamp")
+        
+        // Update last_seen_at when app is paused/closed
+        lifecycleScope.launch {
+            try {
+                val authService = AuthenticationService(this@MainActivity)
+                val deviceId = authService.getStoredDeviceId()
+                
+                if (deviceId != null) {
+                    val currentTimestamp = Instant.now().toString()
+                    val result = SupabaseRepository.updateDevice(
+                        deviceId = deviceId,
+                        lastSeenAt = currentTimestamp
+                    )
+                    
+                    if (result.isSuccess) {
+                        Log.d("MainActivity", "✓ Updated last_seen_at: $currentTimestamp")
+                    } else {
+                        Log.e("MainActivity", "✗ Failed to update last_seen_at: ${result.exceptionOrNull()?.message}")
+                    }
+                } else {
+                    Log.d("MainActivity", "⚠ No device ID found - skipping last_seen_at update")
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "✗ Error updating last_seen_at: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun registerFCMToken(deviceId: String) {
+        // Register the Firebase Cloud Messaging token with the backend.
+        // This enables push notifications to this device.
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val fcmToken = task.result
+                    Log.d("MainActivity", "FCM Token obtained: ${fcmToken.take(20)}...")
+                    
+                    // Register token with backend using BackendRepository
+                    BackendRepository.registerDeviceToken(
+                        deviceToken = fcmToken,
+                        deviceId = deviceId,
+                        onSuccess = {
+                            Log.d("MainActivity", "✓ Device token registered with backend")
+                            Log.d("MainActivity", "  Notifications are now enabled for this device")
+                        },
+                        onError = { error ->
+                            Log.e("MainActivity", "✗ Failed to register device token: $error")
+                            Log.d("MainActivity", "  Notifications will not work until token is registered")
+                        }
+                    )
+                } else {
+                    Log.e("MainActivity", "✗ Failed to get FCM token: ${task.exception?.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "✗ Error registering FCM token: ${e.message}", e)
+        }
     }
 }
 
@@ -1267,4 +1320,13 @@ private fun findSteppedFrameIndex(
  */
 private fun registerFCMToken(deviceId: String) {
     Log.d("MainActivity", "FCM token registration skipped (Firebase removed)")
+
+private fun buildLocationLabel(pointResponse: PointResponse?): String {
+    val city = pointResponse?.properties?.relativeLocation?.properties?.city
+    val state = pointResponse?.properties?.relativeLocation?.properties?.state
+    return if (!city.isNullOrBlank() && !state.isNullOrBlank()) {
+        "$city, $state"
+    } else {
+        "Selected location"
+    }
 }

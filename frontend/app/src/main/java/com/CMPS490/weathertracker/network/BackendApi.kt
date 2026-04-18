@@ -45,6 +45,9 @@ interface BackendApi {
     @POST("supabase/register")
     fun register(@Body record: JsonObject): Call<JsonObject>
     
+    @PATCH("supabase/device")
+    fun updateDevice(@Body record: JsonObject): Call<JsonObject>
+    
     // ===== ML PREDICTION =====
     @POST("predict")
     fun getPrediction(@Body request: JsonObject): Call<JsonObject>

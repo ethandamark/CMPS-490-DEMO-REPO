@@ -27,12 +27,24 @@ venv\Scripts\activate
 source .venv/bin/activate
 ```
 
-2. Install dependencies:
+2. Activate the virtual environment:
+```powershell
+# Windows (PowerShell)
+./.venv/Scripts/Activate.ps1
+
+# Windows (Command Prompt)
+.venv\Scripts\activate.bat
+
+# macOS/Linux
+source .venv/bin/activate
+```
+
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Configure environment variables (optional):
+4. Configure environment variables (optional):
 ```bash
 cp .env.example .env
 # Edit .env with your configuration (Supabase URL, API keys, etc.)
