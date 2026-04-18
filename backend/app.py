@@ -144,10 +144,6 @@ class DeviceUpdateRequest(BaseModel):
     device_id: str
     location_permission_status: bool | None = None
     last_seen_at: str | None = None
-    alert_type: str
-    severity_level: int
-    created_at: str
-    expires_at: str
 
 
 # ============= DEVICE LOCATION MODELS =============
