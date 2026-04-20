@@ -373,13 +373,11 @@ class MainActivity : ComponentActivity() {
                 }
 
                 @SuppressLint("MissingPermission")
-                LaunchedEffect(locationPermissionState.allPermissionsGranted, registrationComplete) {
-                    if (locationPermissionState.allPermissionsGranted && registrationComplete) {
+                LaunchedEffect(locationPermissionState.allPermissionsGranted) {
+                    if (locationPermissionState.allPermissionsGranted) {
                         fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                             if (location != null) {
                                 userLocation = LatLng(location.latitude, location.longitude)
-                                // Note: Device location is auto-created during registration
-                                // and kept updated by LocationTrackingService
                             }
                         }
                     }
@@ -387,10 +385,10 @@ class MainActivity : ComponentActivity() {
 
                 // Continuously update UI location AND backend when device location changes
                 @SuppressLint("MissingPermission")
-                DisposableEffect(locationPermissionState.allPermissionsGranted, registrationComplete, storedDeviceId) {
+                DisposableEffect(locationPermissionState.allPermissionsGranted, storedDeviceId) {
                     var locationCallback: com.google.android.gms.location.LocationCallback? = null
                     
-                    if (locationPermissionState.allPermissionsGranted && registrationComplete) {
+                    if (locationPermissionState.allPermissionsGranted) {
                         val locationRequest = com.google.android.gms.location.LocationRequest.Builder(
                             com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
                             10_000L // Update every 10 seconds for UI
