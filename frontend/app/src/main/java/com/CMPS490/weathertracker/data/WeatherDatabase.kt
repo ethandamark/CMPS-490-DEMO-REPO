@@ -10,8 +10,9 @@ import androidx.room.RoomDatabase
         WeatherCacheEntity::class,
         OfflineWeatherSnapshotEntity::class,
         HourlyPredictionEntity::class,
+        ModelInstanceEntity::class,
     ],
-    version = 2,
+    version = 6,
     exportSchema = false,
 )
 abstract class WeatherDatabase : RoomDatabase() {
@@ -19,6 +20,7 @@ abstract class WeatherDatabase : RoomDatabase() {
     abstract fun weatherCacheDao(): WeatherCacheDao
     abstract fun offlineWeatherSnapshotDao(): OfflineWeatherSnapshotDao
     abstract fun hourlyPredictionDao(): HourlyPredictionDao
+    abstract fun modelInstanceDao(): ModelInstanceDao
 
     companion object {
         private const val DB_NAME = "weather_tracker.db"

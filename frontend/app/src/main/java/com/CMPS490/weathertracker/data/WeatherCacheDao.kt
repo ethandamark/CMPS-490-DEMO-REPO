@@ -65,4 +65,12 @@ interface WeatherCacheDao {
         lonMin: Double,
         lonMax: Double,
     )
+
+    @Query(
+        "SELECT * FROM weather_cache " +
+        "WHERE is_forecast = 0 " +
+        "AND latitude = :lat AND longitude = :lon " +
+        "ORDER BY recorded_at DESC LIMIT 1"
+    )
+    suspend fun getLatestObservation(lat: Double, lon: Double): WeatherCacheEntity?
 }

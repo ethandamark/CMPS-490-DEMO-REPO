@@ -138,7 +138,7 @@
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `offline_weather_id` | UUID | PRIMARY KEY |
+| `weather_id` | UUID | PRIMARY KEY |
 | `device_id` | UUID | FK → device |
 | `cache_id` | UUID | FK → weather_cache |
 | `synced_at` | TIMESTAMP | |
