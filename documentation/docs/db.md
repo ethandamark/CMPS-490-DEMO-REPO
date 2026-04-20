@@ -54,8 +54,7 @@
 | `anon_user_id` | UUID | PRIMARY KEY |
 | `created_at` | TIMESTAMP | NOT NULL |
 | `last_active_at` | TIMESTAMP | |
-| `notification_opt_in` | BOOLEAN | |
-| `status` | status_enum | |
+| `status` | status_enum | DEFAULT 'active' |
 
 #### 2. device
 
@@ -67,8 +66,7 @@
 | `platform` | platform_enum | |
 | `app_version` | VARCHAR(50) | |
 | `location_permission_status` | BOOLEAN | |
-| `last_seen_at` | TIMESTAMP | |
-| `created_at` | TIMESTAMP | |
+| `notifications_enabled` | BOOLEAN | DEFAULT false |
 
 #### 3. device_location
 
