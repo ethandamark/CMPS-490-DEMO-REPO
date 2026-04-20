@@ -58,6 +58,7 @@ fun WeatherOverviewScreen(
     onSaveCurrentLocation: () -> Unit,
     onLiveRadarClick: () -> Unit,
     stormRiskTimeline: List<Pair<Long, Float>> = emptyList(),
+    backendConnected: Boolean = true,
 ) {
     val palette = WeatherTrackerThemeState.palette
     val visualStyle = weatherVisualStyleFor(currentWeather, hasSevereAlert = alert != null)
@@ -81,6 +82,12 @@ fun WeatherOverviewScreen(
                     canSaveCurrentLocation = canSaveCurrentLocation,
                     onSaveCurrentLocation = onSaveCurrentLocation
                 )
+            }
+
+            if (!backendConnected) {
+                item {
+                    BackendConnectionBanner()
+                }
             }
 
             item {
@@ -156,6 +163,40 @@ private fun ForecastUnavailableCard() {
                 style = MaterialTheme.typography.bodyMedium,
                 color = palette.mutedText
             )
+        }
+    }
+}
+
+@Composable
+private fun BackendConnectionBanner() {
+    Surface(
+        color = Color(0xFF5D4037).copy(alpha = 0.85f),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp,
+                color = Color(0xFFFFB74D)
+            )
+            Column {
+                Text(
+                    text = "Connecting to backend\u2026",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Showing weather from Open-Meteo. Retrying every 10s.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.7f)
+                )
+            }
         }
     }
 }

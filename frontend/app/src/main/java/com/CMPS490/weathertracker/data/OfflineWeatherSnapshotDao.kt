@@ -33,7 +33,7 @@ interface OfflineWeatherSnapshotDao {
 
     @Query(
         "UPDATE offline_weather_snapshot SET synced_at = :syncedAt " +
-        "WHERE offline_weather_id IN (:ids)"
+        "WHERE weather_id IN (:ids)"
     )
     suspend fun markSynced(ids: List<String>, syncedAt: Long)
 

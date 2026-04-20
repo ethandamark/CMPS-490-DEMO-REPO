@@ -24,8 +24,6 @@ data class DeviceRecord(
     val deviceId: String,
     @SerializedName("anon_user_id")
     val anonUserId: String,
-    @SerializedName("alert_token")
-    val alertToken: String? = null,
     @SerializedName("platform")
     val platform: String = "android",
     @SerializedName("app_version")

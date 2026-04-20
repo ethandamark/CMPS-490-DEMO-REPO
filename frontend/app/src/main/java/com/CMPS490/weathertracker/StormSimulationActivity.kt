@@ -39,6 +39,9 @@ class StormSimulationActivity : ComponentActivity() {
         // New Orleans area — Katrina landfall
         private const val LAT = 29.95
         private const val LON = -90.07
+
+        // Dummy UUID so simulation model_instances don't reference real snapshots
+        private const val SIMULATION_SNAPSHOT_ID = "00000000-0000-0000-0000-000000000000"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -209,6 +212,7 @@ class StormSimulationActivity : ComponentActivity() {
                 addProperty("result_level", result.alertState)
                 addProperty("result_type", resultType)
                 addProperty("confidence_score", result.stormProbability.toDouble())
+                addProperty("weather_id", SIMULATION_SNAPSHOT_ID)
             }
             val response = BackendRetrofitInstance.api.createModelInstance(deviceId, body).execute()
             if (response.isSuccessful) {

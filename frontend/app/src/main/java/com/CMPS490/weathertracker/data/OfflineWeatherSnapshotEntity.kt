@@ -20,7 +20,7 @@ import androidx.room.PrimaryKey
 )
 data class OfflineWeatherSnapshotEntity(
     @PrimaryKey
-    @ColumnInfo(name = "offline_weather_id") val offlineWeatherId: String,
+    @ColumnInfo(name = "weather_id") val weatherId: String,
     @ColumnInfo(name = "device_id") val deviceId: String,
     @ColumnInfo(name = "cache_id") val cacheId: String,
     @ColumnInfo(name = "synced_at") val syncedAt: Long?,

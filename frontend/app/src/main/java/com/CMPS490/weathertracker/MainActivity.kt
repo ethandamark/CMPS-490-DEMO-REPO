@@ -61,6 +61,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
+import androidx.activity.compose.rememberLauncherForActivityResult
 import com.google.gson.Gson
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
@@ -118,6 +119,8 @@ class MainActivity : ComponentActivity() {
                 var registrationComplete by remember { mutableStateOf(false) }
                 var storedDeviceId by remember { mutableStateOf<String?>(null) }
                 var permissionDialogShown by remember { mutableStateOf(false) }
+                var backendConnected by remember { mutableStateOf(true) }
+                var retryTrigger by remember { mutableStateOf(0) }
 
                 // Use SharedPreferences to persist permission request state across Activity recreation
                 val prefs = remember { context.getSharedPreferences("weather_tracker_prefs", android.content.Context.MODE_PRIVATE) }
@@ -125,6 +128,9 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf(prefs.getBoolean("location_prompt_answered", false)) 
                 }
                 var showLocationDialog by remember { mutableStateOf(false) }
+                var notificationPromptAnswered by remember {
+                    mutableStateOf(prefs.getBoolean("notification_prompt_answered", false))
+                }
 
                 val locationPermissionState = rememberMultiplePermissionsState(
                     permissions = listOf(
@@ -141,6 +147,28 @@ class MainActivity : ComponentActivity() {
                     rememberPermissionState(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 } else {
                     null
+                }
+
+                // Notification permission launcher (Android 13+)
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    notificationPromptAnswered = true
+                    prefs.edit().putBoolean("notification_prompt_answered", true).apply()
+                    if (granted) {
+                        Log.d("MainActivity", "✓ Notification permission granted")
+                        // Update device in Supabase
+                        storedDeviceId?.let { deviceId ->
+                            BackendRepository.updateDevice(
+                                deviceId = deviceId,
+                                notificationsEnabled = true,
+                                onSuccess = { Log.d("MainActivity", "✓ notifications_enabled set to true") },
+                                onError = { e -> Log.e("MainActivity", "✗ Failed to update notifications_enabled: ${e.message}") }
+                            )
+                        }
+                    } else {
+                        Log.d("MainActivity", "Notification permission denied")
+                    }
                 }
 
                 // Function to open app's location permission settings directly
@@ -166,37 +194,56 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Show custom location dialog on first launch
-                LaunchedEffect(Unit) {
-                    if (!locationPromptAnswered && !locationPermissionState.allPermissionsGranted) {
-                        showLocationDialog = true
-                    } else if (locationPermissionState.allPermissionsGranted) {
-                        // Already granted, mark as complete
+                // Check if notifications are enabled at the OS level
+                val notificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.POST_NOTIFICATIONS
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                } else {
+                    true // Pre-Android 13: notifications always allowed
+                }
+
+                // Show permission dialog on every launch until BOTH permissions are granted
+                LaunchedEffect(locationPermissionState.allPermissionsGranted, notificationsGranted) {
+                    if (locationPermissionState.allPermissionsGranted && notificationsGranted) {
+                        // Both granted — persist and skip dialog forever
                         permissionDialogShown = true
                         locationPromptAnswered = true
+                        notificationPromptAnswered = true
+                        prefs.edit()
+                            .putBoolean("location_prompt_answered", true)
+                            .putBoolean("notification_prompt_answered", true)
+                            .apply()
+                    } else if (!locationPromptAnswered || !notificationsGranted || !locationPermissionState.allPermissionsGranted) {
+                        showLocationDialog = true
                     }
                 }
 
-                // Custom Location Permission Dialog
+                // Combined Location + Notification Permission Dialog
                 if (showLocationDialog) {
                     AlertDialog(
                         onDismissRequest = { 
-                            // User dismissed - treat as "Don't Allow"
+                            // User dismissed — allow the rest of the app to proceed
+                            // but do NOT persist to SharedPreferences so dialog shows again next launch
                             showLocationDialog = false
                             locationPromptAnswered = true
-                            prefs.edit().putBoolean("location_prompt_answered", true).apply()
+                            notificationPromptAnswered = true
                             permissionDialogShown = true
                         },
                         title = {
                             Text(
-                                text = "Location Access",
+                                text = "App Permissions",
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White
                             )
                         },
                         text = {
                             Text(
-                                text = "Do you want to allow WeatherTracker precise/approx. location for in app tracking?",
+                                text = "WeatherTracker needs your permission to:\n\n" +
+                                    "• Access your location for weather tracking\n" +
+                                    "• Send notifications for severe weather alerts\n\n" +
+                                    "Severe weather predictions and alerts will not be available until these permissions are granted.\n\n" +
+                                    "Tap 'Allow' to open Settings and grant these permissions.",
                                 color = Color.White.copy(alpha = 0.9f)
                             )
                         },
@@ -205,23 +252,30 @@ class MainActivity : ComponentActivity() {
                                 onClick = {
                                     showLocationDialog = false
                                     locationPromptAnswered = true
-                                    prefs.edit().putBoolean("location_prompt_answered", true).apply()
-                                    // Open app's location permission settings directly
+                                    notificationPromptAnswered = true
+                                    // Do NOT persist — LaunchedEffect will persist once both are granted
+                                    // Open app's permission settings for location
                                     openLocationPermissionSettings()
+                                    // Also request notification permission (Android 13+)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF4CAF50)
                                 )
                             ) {
-                                Text("Allow Location", color = Color.White)
+                                Text("Allow", color = Color.White)
                             }
                         },
                         dismissButton = {
                             TextButton(
                                 onClick = {
+                                    // User declined — allow app to proceed this session
+                                    // but dialog will reappear on next launch
                                     showLocationDialog = false
                                     locationPromptAnswered = true
-                                    prefs.edit().putBoolean("location_prompt_answered", true).apply()
+                                    notificationPromptAnswered = true
                                     permissionDialogShown = true
                                 }
                             ) {
@@ -237,6 +291,15 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(locationPermissionState.allPermissionsGranted) {
                     if (locationPermissionState.allPermissionsGranted && locationPromptAnswered) {
                         permissionDialogShown = true
+                        // Update location_permission_status in Supabase
+                        storedDeviceId?.let { deviceId ->
+                            BackendRepository.updateDevice(
+                                deviceId = deviceId,
+                                locationPermissionStatus = true,
+                                onSuccess = { Log.d("MainActivity", "✓ location_permission_status set to true") },
+                                onError = { e -> Log.e("MainActivity", "✗ Failed to update location_permission_status: ${e.message}") }
+                            )
+                        }
                     }
                 }
 
@@ -262,7 +325,8 @@ class MainActivity : ComponentActivity() {
 
                 // Run registration AFTER location dialog is answered (for new users)
                 // Or immediately if credentials already exist
-                LaunchedEffect(locationPromptAnswered, permissionDialogShown) {
+                // Also retries when backend connection is restored after being down
+                LaunchedEffect(locationPromptAnswered, permissionDialogShown, backendConnected) {
                     // Skip if already registered or registration in progress
                     if (registrationComplete || registrationInProgress) return@LaunchedEffect
                     
@@ -310,13 +374,11 @@ class MainActivity : ComponentActivity() {
                 }
 
                 @SuppressLint("MissingPermission")
-                LaunchedEffect(locationPermissionState.allPermissionsGranted, registrationComplete) {
-                    if (locationPermissionState.allPermissionsGranted && registrationComplete) {
+                LaunchedEffect(locationPermissionState.allPermissionsGranted) {
+                    if (locationPermissionState.allPermissionsGranted) {
                         fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                             if (location != null) {
                                 userLocation = LatLng(location.latitude, location.longitude)
-                                // Note: Device location is auto-created during registration
-                                // and kept updated by LocationTrackingService
                             }
                         }
                     }
@@ -324,10 +386,10 @@ class MainActivity : ComponentActivity() {
 
                 // Continuously update UI location AND backend when device location changes
                 @SuppressLint("MissingPermission")
-                DisposableEffect(locationPermissionState.allPermissionsGranted, registrationComplete, storedDeviceId) {
+                DisposableEffect(locationPermissionState.allPermissionsGranted, storedDeviceId) {
                     var locationCallback: com.google.android.gms.location.LocationCallback? = null
                     
-                    if (locationPermissionState.allPermissionsGranted && registrationComplete) {
+                    if (locationPermissionState.allPermissionsGranted) {
                         val locationRequest = com.google.android.gms.location.LocationRequest.Builder(
                             com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
                             10_000L // Update every 10 seconds for UI
@@ -456,6 +518,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(registrationComplete) {
                     if (!registrationComplete) return@LaunchedEffect
                     com.CMPS490.weathertracker.sync.SnapshotSyncManager.init(context)
+                    com.CMPS490.weathertracker.sync.ModelInstanceSyncManager.init(context)
                     val forecastRequest = androidx.work.PeriodicWorkRequestBuilder<com.CMPS490.weathertracker.data.ForecastFetcher>(
                         6, java.util.concurrent.TimeUnit.HOURS
                     ).setConstraints(
@@ -505,7 +568,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
+                LaunchedEffect(weatherQueryLocation?.latitude, weatherQueryLocation?.longitude, retryTrigger) {
                     if (weatherQueryLocation == null) {
                         return@LaunchedEffect
                     }
@@ -525,7 +588,6 @@ class MainActivity : ComponentActivity() {
                     }
 
                     var requestAlert: WeatherAlertUiModel? = null
-                    var backendConnectionFailed = false
 
                     // Get weather alerts from backend
                     BackendRepository.getAlerts("$lat,$lon",
@@ -613,6 +675,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     currentWeather = mapCurrentWeather(locationLabel, forecastPeriods)
                                     forecastWeather = mapForecast(forecastPeriods)
+                                    backendConnected = true
 
                                     WeatherApiCache.put(
                                         lat = lat,
@@ -674,12 +737,39 @@ class MainActivity : ComponentActivity() {
                                 return@getWeatherPoints
                             }
                             Log.e("MainActivity", "Backend connection error: ${error.message}")
-                            backendConnectionFailed = true
+                            backendConnected = false
                             forecastWeather = emptyList()
                         }
                     )
                 }
-                
+
+                // Fallback: fetch from Open-Meteo when backend is unavailable + retry every 10s
+                LaunchedEffect(backendConnected, weatherQueryLocation?.latitude, weatherQueryLocation?.longitude) {
+                    if (backendConnected || weatherQueryLocation == null) return@LaunchedEffect
+
+                    val lat = weatherQueryLocation.latitude
+                    val lon = weatherQueryLocation.longitude
+                    val label = locationName.ifBlank { "Current Location" }
+
+                    val fallback = OpenMeteoFallback.fetch(lat, lon, label)
+                    if (fallback != null) {
+                        currentWeather = fallback.current
+                        forecastWeather = fallback.forecast
+                    }
+
+                    // Retry backend connection every 10 seconds
+                    while (true) {
+                        delay(10_000)
+                        if (OpenMeteoFallback.checkBackendHealth()) {
+                            Log.d("MainActivity", "✓ Backend connection restored")
+                            backendConnected = true
+                            retryTrigger++
+                            break
+                        }
+                        Log.d("MainActivity", "⏳ Backend still unreachable, retrying in 10s...")
+                    }
+                }
+
                 NavHost(navController = navController, startDestination = "weather_overview") {
                     composable("weather_overview") {
                         WeatherOverviewScreen(
@@ -709,6 +799,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onLiveRadarClick = { navController.navigate("map_screen") },
                             stormRiskTimeline = stormRiskTimeline,
+                            backendConnected = backendConnected,
                         )
                     }
                     composable("map_screen") {

@@ -134,7 +134,7 @@ object BackendRepository {
     
     /**
      * Register anonymous user + device in one call.
-     * Backend generates ALL identifiers (userId, deviceId, alertToken).
+     * Backend generates ALL identifiers (userId, deviceId).
      * Frontend only sends locationPermissionStatus (a device-side fact).
      * Returns (userId, deviceId) pair on success.
      */
@@ -186,6 +186,7 @@ object BackendRepository {
     fun updateDevice(
         deviceId: String,
         locationPermissionStatus: Boolean? = null,
+        notificationsEnabled: Boolean? = null,
         lastSeenAt: String? = null,
         onSuccess: () -> Unit,
         onError: (Exception) -> Unit
@@ -195,6 +196,7 @@ object BackendRepository {
             val record = JsonObject().apply {
                 addProperty("device_id", deviceId)
                 locationPermissionStatus?.let { addProperty("location_permission_status", it) }
+                notificationsEnabled?.let { addProperty("notifications_enabled", it) }
                 lastSeenAt?.let { addProperty("last_seen_at", it) }
             }
             
@@ -259,12 +261,11 @@ object BackendRepository {
      */
     fun syncSnapshots(
         deviceId: String,
-        snapshotsJson: com.google.gson.JsonArray,
+        body: JsonObject,
         onSuccess: (JsonObject) -> Unit,
         onError: (Exception) -> Unit,
     ) {
         try {
-            val body = JsonObject().apply { add("snapshots", snapshotsJson) }
             api.syncSnapshots(deviceId, body).enqueue(object : Callback<JsonObject> {
                 override fun onResponse(call: Call<JsonObject>, response: Response<JsonObject>) {
                     if (response.isSuccessful && response.body() != null) {
