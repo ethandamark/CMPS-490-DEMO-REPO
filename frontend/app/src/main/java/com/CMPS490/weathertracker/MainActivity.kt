@@ -242,6 +242,7 @@ class MainActivity : ComponentActivity() {
                                 text = "WeatherTracker needs your permission to:\n\n" +
                                     "• Access your location for weather tracking\n" +
                                     "• Send notifications for severe weather alerts\n\n" +
+                                    "Severe weather predictions and alerts will not be available until these permissions are granted.\n\n" +
                                     "Tap 'Allow' to open Settings and grant these permissions.",
                                 color = Color.White.copy(alpha = 0.9f)
                             )
