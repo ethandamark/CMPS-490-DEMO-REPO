@@ -108,27 +108,19 @@ class SnapshotSyncWorker(
 
         val db = WeatherDatabase.getInstance(applicationContext)
 
-        // Send ALL cached snapshots (observations + forecasts) so the backend gets full history
-        val allSnapshots = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 250)
+        // Only fetch UNSYNCED snapshots to avoid re-sending already-synced data
+        val unsyncedSnapshots = db.offlineWeatherSnapshotDao().getUnsyncedSnapshots(deviceId)
 
-        if (allSnapshots.isEmpty()) {
-            Log.d(TAG, "No snapshots to sync")
+        if (unsyncedSnapshots.isEmpty()) {
+            Log.d(TAG, "No unsynced snapshots to sync")
             return Result.success()
         }
 
-        // Find which ones haven't been synced yet (to mark after success)
-        val unsyncedIds = allSnapshots
-            .filter { it.snapshot.syncedAt == null }
-            .map { it.snapshot.weatherId }
+        val unsyncedIds = unsyncedSnapshots.map { it.snapshot.weatherId }
 
-        if (unsyncedIds.isEmpty()) {
-            Log.d(TAG, "All snapshots already synced")
-            return Result.success()
-        }
-
-        // Bundle ALL cache rows into ONE weather_data JSONB array
+        // Bundle ONLY unsynced cache rows into ONE weather_data JSONB array
         val weatherDataArray = JsonArray()
-        for (item in allSnapshots) {
+        for (item in unsyncedSnapshots) {
             val cacheJson = JsonObject().apply {
                 addProperty("cache_id", item.cache.cacheId)
                 addProperty("temp", item.cache.temp)
@@ -174,7 +166,7 @@ class SnapshotSyncWorker(
 
         return if (syncResult.isSuccess) {
             db.offlineWeatherSnapshotDao().markSynced(ids, System.currentTimeMillis())
-            Log.i(TAG, "✓ Synced ${allSnapshots.size} snapshots (${ids.size} newly marked) to backend")
+            Log.i(TAG, "✓ Synced ${unsyncedSnapshots.size} unsynced snapshots (${unsyncedIds.size} newly marked) to backend")
             Result.success()
         } else {
             Log.e(TAG, "✗ Sync failed: ${syncResult.exceptionOrNull()?.message}")
