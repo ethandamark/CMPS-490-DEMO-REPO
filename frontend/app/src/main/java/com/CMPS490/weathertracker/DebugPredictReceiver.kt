@@ -68,7 +68,7 @@ class DebugPredictReceiver : BroadcastReceiver() {
                     temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
                     humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
                     windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
-                    windDirection = null,
+                    windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
                     precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
                     pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
                     recordedAt = hourMs,

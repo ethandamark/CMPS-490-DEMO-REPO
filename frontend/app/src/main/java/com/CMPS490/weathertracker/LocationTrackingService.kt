@@ -16,12 +16,13 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.CMPS490.weathertracker.data.ForecastFetcher.Companion.deterministicCacheId
+import com.CMPS490.weathertracker.data.ForecastFetcher.Companion.deterministicSnapshotId
 import com.CMPS490.weathertracker.data.OfflineWeatherSnapshotEntity
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
-import com.CMPS490.weathertracker.network.BackendRetrofitInstance
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -39,6 +40,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foreground Service for continuous background location tracking.
@@ -117,7 +119,7 @@ class LocationTrackingService : Service() {
     private val MIN_SNAPSHOT_DISTANCE_METERS = 5000f
 
     // Whether we've already seeded 24h of weather history into Room DB
-    private var hasSeededHistory = false
+    private val hasSeededHistory = AtomicBoolean(false)
 
     // Track when we last ran a weather snapshot + prediction
     private var lastSnapshotTimeMs: Long = 0L
@@ -173,8 +175,9 @@ class LocationTrackingService : Service() {
                             storeWeatherSnapshot(deviceId, location.latitude, location.longitude, runPrediction = true)
                         }
                     } else if (significantMove) {
-                        // Moved 5+ km — grab a fresh weather snapshot but skip prediction
-                        Log.d(TAG, "   📍 Significant move (5km+), storing snapshot only (no prediction)")
+                        // Moved 5+ km — update backend location + grab a fresh weather snapshot
+                        Log.d(TAG, "   📍 Significant move (5km+), updating location + storing snapshot (no prediction)")
+                        updateLocationInBackend(location.latitude, location.longitude)
                         lastSnapshotLatitude = location.latitude
                         lastSnapshotLongitude = location.longitude
                         serviceScope.launch {
@@ -367,18 +370,62 @@ class LocationTrackingService : Service() {
             val db = WeatherDatabase.getInstance(this)
 
             // Fetch current weather from Open-Meteo
-            val weatherData = fetchOpenMeteoWeather(latitude, longitude) ?: run {
-                Log.w(TAG, "Open-Meteo fetch failed, skipping snapshot")
+            val weatherData = fetchOpenMeteoWeather(latitude, longitude)
+
+            if (weatherData == null) {
+                Log.w(TAG, "Open-Meteo fetch failed (offline?) — running prediction from cached/forecast data")
+                // Skip snapshot storage but still attempt prediction with existing Room data
+                if (runPrediction) {
+                    val featureService = FeatureAssemblyService(db)
+                    val features = featureService.assembleFeatures(latitude, longitude)
+                    if (features.isNotEmpty()) {
+                        val predictor = OnDevicePredictor.getInstance(this)
+                        val result = predictor.predict(features)
+                        Log.d(TAG, "🤖 Offline prediction: prob=${result.stormProbability}, alert=${result.alertState}")
+
+                        db.hourlyPredictionDao().upsert(
+                            com.CMPS490.weathertracker.data.HourlyPredictionEntity(
+                                timestamp = hourMs,
+                                stormProbability = result.stormProbability,
+                                alertState = result.alertState,
+                                modelVersion = result.modelVersion,
+                            )
+                        )
+                        db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
+
+                        if (result.alertState == 1) {
+                            fireStormNotification(result.stormProbability)
+                        }
+
+                        val resultType = if (result.alertState == 1) "storm" else "clear"
+                        db.modelInstanceDao().upsert(
+                            com.CMPS490.weathertracker.data.ModelInstanceEntity(
+                                instanceId = UUID.randomUUID().toString(),
+                                deviceId = deviceId,
+                                version = result.modelVersion,
+                                latitude = latitude,
+                                longitude = longitude,
+                                resultLevel = result.alertState,
+                                resultType = resultType,
+                                confidenceScore = result.stormProbability,
+                                createdAt = nowMs,
+                            )
+                        )
+                        db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
+                    } else {
+                        Log.w(TAG, "No cached/forecast data available for offline prediction")
+                    }
+                }
                 return
             }
 
-            val cacheId = UUID.randomUUID().toString()
+            val cacheId = deterministicCacheId(latitude, longitude, hourMs, false)
             val cacheEntity = WeatherCacheEntity(
                 cacheId = cacheId,
                 temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
                 humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
                 windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
-                windDirection = null,
+                windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
                 precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
                 pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
                 recordedAt = hourMs,
@@ -402,10 +449,10 @@ class LocationTrackingService : Service() {
 
             // Clear is_current flag and insert new snapshot
             db.offlineWeatherSnapshotDao().clearCurrentFlag(deviceId)
-            val snapshotId = UUID.randomUUID().toString()
+            val snapshotId = deterministicSnapshotId(cacheId)
             db.offlineWeatherSnapshotDao().upsertSnapshot(
                 OfflineWeatherSnapshotEntity(
-                    offlineWeatherId = snapshotId,
+                    weatherId = snapshotId,
                     deviceId = deviceId,
                     cacheId = cacheId,
                     syncedAt = null,
@@ -417,6 +464,9 @@ class LocationTrackingService : Service() {
             val cutoff48h = nowMs - 48 * MILLIS_PER_HOUR
             db.weatherCacheDao().pruneOlderThan(cutoff48h)
             db.offlineWeatherSnapshotDao().pruneOld(deviceId, cutoff48h)
+
+            // Backfill any hours we missed while offline with actual observations
+            backfillMissedObservations(deviceId, latitude, longitude, hourMs, db)
 
             // Seed 24h of historical weather on first run so predictor has history
             seedWeatherHistory(deviceId, latitude, longitude, db)
@@ -445,8 +495,23 @@ class LocationTrackingService : Service() {
                         fireStormNotification(result.stormProbability)
                     }
 
-                    // Record model instance in Supabase via backend
-                    sendModelInstance(deviceId, latitude, longitude, result)
+                    // Store model instance locally — sync worker will push to backend
+                    val resultType = if (result.alertState == 1) "storm" else "clear"
+                    db.modelInstanceDao().upsert(
+                        com.CMPS490.weathertracker.data.ModelInstanceEntity(
+                            instanceId = java.util.UUID.randomUUID().toString(),
+                            deviceId = deviceId,
+                            version = result.modelVersion,
+                            latitude = latitude,
+                            longitude = longitude,
+                            resultLevel = result.alertState,
+                            resultType = resultType,
+                            confidenceScore = result.stormProbability,
+                            createdAt = nowMs,
+                        )
+                    )
+                    // Prune synced model instances older than 48h
+                    db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
                 }
             } else {
                 Log.d(TAG, "📦 Snapshot stored (prediction skipped)")
@@ -482,6 +547,137 @@ class LocationTrackingService : Service() {
     }
 
     /**
+     * When back online, check for gaps in observation data (hours missed while offline)
+     * and backfill them with actual weather from Open-Meteo, replacing forecast-only rows.
+     * Only backfills gaps > 1 hour, up to 48 hours.
+     */
+    private suspend fun backfillMissedObservations(
+        deviceId: String,
+        latitude: Double,
+        longitude: Double,
+        currentHourMs: Long,
+        db: WeatherDatabase,
+    ) {
+        try {
+            val delta = 5.0 * 0.009
+            val observations = db.weatherCacheDao().getObservationsNear(
+                latMin = latitude - delta,
+                latMax = latitude + delta,
+                lonMin = longitude - delta,
+                lonMax = longitude + delta,
+                limit = 48,
+            )
+            if (observations.isEmpty()) return
+
+            // Find the most recent observation BEFORE the one we just stored (currentHourMs)
+            val previousObs = observations
+                .filter { it.recordedAt < currentHourMs }
+                .maxByOrNull { it.recordedAt }
+                ?: return
+
+            val gapHours = ((currentHourMs - previousObs.recordedAt) / MILLIS_PER_HOUR).toInt()
+            if (gapHours <= 1) return  // no gap to fill
+
+            val hoursToFetch = gapHours.coerceAtMost(48)
+            Log.d(TAG, "🔄 Detected ${gapHours}h observation gap — backfilling $hoursToFetch hours from Open-Meteo")
+
+            // Fetch hourly historical data from Open-Meteo for the gap period
+            val startHourMs = previousObs.recordedAt + MILLIS_PER_HOUR
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+            val startDate = sdf.format(java.util.Date(startHourMs))
+            val endDate = sdf.format(java.util.Date(currentHourMs))
+
+            val url = "https://api.open-meteo.com/v1/forecast" +
+                "?latitude=$latitude&longitude=$longitude" +
+                "&timezone=UTC&wind_speed_unit=kmh" +
+                "&start_date=$startDate&end_date=$endDate" +
+                "&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
+            val request = Request.Builder().url(url).build()
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                Log.w(TAG, "🔄 Backfill fetch failed: ${response.code}")
+                return
+            }
+            val body = response.body?.string() ?: return
+            val json = JSONObject(body)
+            val hourly = json.optJSONObject("hourly") ?: return
+            val elevation = json.optDouble("elevation")
+
+            val times = hourly.optJSONArray("time") ?: return
+            val temps = hourly.optJSONArray("temperature_2m")
+            val humidities = hourly.optJSONArray("relative_humidity_2m")
+            val dewPoints = hourly.optJSONArray("dew_point_2m")
+            val precips = hourly.optJSONArray("precipitation")
+            val pressures = hourly.optJSONArray("pressure_msl")
+            val windSpeeds = hourly.optJSONArray("wind_speed_10m")
+            val windDirs = hourly.optJSONArray("wind_direction_10m")
+
+            val isoFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+
+            val entities = mutableListOf<WeatherCacheEntity>()
+            val snapshots = mutableListOf<OfflineWeatherSnapshotEntity>()
+
+            for (i in 0 until times.length()) {
+                val timeStr = times.optString(i) ?: continue
+                val rowMs = isoFormat.parse(timeStr)?.time ?: continue
+                // Only backfill hours in the gap (after last obs, before current hour)
+                if (rowMs <= previousObs.recordedAt || rowMs >= currentHourMs) continue
+
+                val cacheId = deterministicCacheId(latitude, longitude, rowMs, false)
+                entities.add(
+                    WeatherCacheEntity(
+                        cacheId = cacheId,
+                        temp = temps?.optDouble(i)?.takeUnless { it.isNaN() },
+                        humidity = humidities?.optDouble(i)?.takeUnless { it.isNaN() },
+                        windSpeed = windSpeeds?.optDouble(i)?.takeUnless { it.isNaN() },
+                        windDirection = windDirs?.optDouble(i)?.takeUnless { it.isNaN() },
+                        precipitationAmount = precips?.optDouble(i)?.takeUnless { it.isNaN() },
+                        pressure = pressures?.optDouble(i)?.takeUnless { it.isNaN() },
+                        recordedAt = rowMs,
+                        latitude = latitude,
+                        longitude = longitude,
+                        isForecast = false,
+                        dewPointC = dewPoints?.optDouble(i)?.takeUnless { it.isNaN() },
+                        elevation = elevation.takeUnless { it.isNaN() },
+                        distToCoastKm = null,
+                        nwpCapeF36Max = null,
+                        nwpCinF36Max = null,
+                        nwpPwatF36Max = null,
+                        nwpSrh03F36Max = null,
+                        nwpLiF36Min = null,
+                        nwpLclF36Min = null,
+                        nwpAvailableLeads = null,
+                        mrmsMaxDbz75km = null,
+                    )
+                )
+                snapshots.add(
+                    OfflineWeatherSnapshotEntity(
+                        weatherId = deterministicSnapshotId(cacheId),
+                        deviceId = deviceId,
+                        cacheId = cacheId,
+                        syncedAt = null,
+                        isCurrent = false,
+                    )
+                )
+            }
+
+            if (entities.isNotEmpty()) {
+                db.weatherCacheDao().upsertAll(entities)
+                for (snap in snapshots) {
+                    db.offlineWeatherSnapshotDao().upsertSnapshot(snap)
+                }
+                Log.d(TAG, "🔄 Backfilled ${entities.size} actual observations for offline gap")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "🔄 Backfill error: ${e.message}")
+        }
+    }
+
+    /**
      * On first run, call the backend to fetch 24 h of historical weather
      * from Open-Meteo → Supabase → Room DB.  Skips if Room already has ≥ 12 rows.
      */
@@ -491,10 +687,10 @@ class LocationTrackingService : Service() {
         longitude: Double,
         db: WeatherDatabase,
     ) {
-        if (hasSeededHistory) return
+        if (!hasSeededHistory.compareAndSet(false, true)) return
 
         // Check if Room DB already has enough observations
-        val delta = 50.0 * 0.009
+        val delta = 5.0 * 0.009
         val existing = db.weatherCacheDao().getObservationsNear(
             latMin = latitude - delta,
             latMax = latitude + delta,
@@ -503,7 +699,6 @@ class LocationTrackingService : Service() {
         )
         if (existing.size >= 12) {
             Log.d(TAG, "⏭ Room DB already has ${existing.size} observations, skipping history seed")
-            hasSeededHistory = true
             return
         }
 
@@ -533,25 +728,30 @@ class LocationTrackingService : Service() {
 
             val rows = json.optJSONArray("weather_rows") ?: return
             val entities = mutableListOf<WeatherCacheEntity>()
+            val snapshots = mutableListOf<OfflineWeatherSnapshotEntity>()
 
             for (i in 0 until rows.length()) {
                 val row = rows.getJSONObject(i)
                 val recordedAtMs = row.optLong("recorded_at_ms", 0L)
                 if (recordedAtMs == 0L) continue
 
+                val isForecast = row.optBoolean("is_forecast", false)
+                val cacheId = row.optString("cache_id",
+                    deterministicCacheId(latitude, longitude, recordedAtMs, isForecast))
+
                 entities.add(
                     WeatherCacheEntity(
-                        cacheId = row.optString("cache_id", UUID.randomUUID().toString()),
+                        cacheId = cacheId,
                         temp = row.optDouble("temp").takeUnless { it.isNaN() },
                         humidity = row.optDouble("humidity").takeUnless { it.isNaN() },
                         windSpeed = row.optDouble("wind_speed").takeUnless { it.isNaN() },
-                        windDirection = null,
+                        windDirection = row.optDouble("wind_direction").takeUnless { it.isNaN() },
                         precipitationAmount = row.optDouble("precipitation_amount").takeUnless { it.isNaN() },
                         pressure = row.optDouble("pressure").takeUnless { it.isNaN() },
                         recordedAt = recordedAtMs,
                         latitude = latitude,
                         longitude = longitude,
-                        isForecast = false,
+                        isForecast = isForecast,
                         dewPointC = row.optDouble("dew_point_c").takeUnless { it.isNaN() },
                         elevation = row.optDouble("elevation").takeUnless { it.isNaN() },
                         distToCoastKm = null,
@@ -565,44 +765,29 @@ class LocationTrackingService : Service() {
                         mrmsMaxDbz75km = null,
                     )
                 )
+
+                snapshots.add(
+                    OfflineWeatherSnapshotEntity(
+                        weatherId = deterministicSnapshotId(cacheId),
+                        deviceId = deviceId,
+                        cacheId = cacheId,
+                        syncedAt = null,
+                        isCurrent = false,
+                    )
+                )
             }
 
             if (entities.isNotEmpty()) {
                 db.weatherCacheDao().upsertAll(entities)
-                Log.d(TAG, "🌱 Seeded ${entities.size} weather snapshots into Room DB")
+                db.offlineWeatherSnapshotDao().upsertSnapshots(snapshots)
+                val obsCount = entities.count { !it.isForecast }
+                val fcCount = entities.count { it.isForecast }
+                Log.d(TAG, "🌱 Seeded $obsCount observations + $fcCount forecasts into Room DB")
             }
-
-            hasSeededHistory = true
         } catch (e: Exception) {
             Log.e(TAG, "🌱 Weather history seed error", e)
-        }
-    }
-
-    private fun sendModelInstance(
-        deviceId: String,
-        latitude: Double,
-        longitude: Double,
-        result: com.CMPS490.weathertracker.ml.PredictionResult,
-    ) {
-        try {
-            val resultType = if (result.alertState == 1) "storm" else "clear"
-            val body = com.google.gson.JsonObject().apply {
-                addProperty("version", "v1.0.0")
-                addProperty("latitude", latitude)
-                addProperty("longitude", longitude)
-                addProperty("result_level", result.alertState)
-                addProperty("result_type", resultType)
-                addProperty("confidence_score", result.stormProbability.toDouble())
-            }
-            val call = BackendRetrofitInstance.api.createModelInstance(deviceId, body)
-            val response = call.execute()
-            if (response.isSuccessful) {
-                Log.d(TAG, "✓ model_instance recorded: level=${result.alertState}, confidence=${result.stormProbability}")
-            } else {
-                Log.w(TAG, "✗ model_instance failed: ${response.code()} ${response.errorBody()?.string()?.take(200)}")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "✗ model_instance error: ${e.message}")
+            // Reset flag so seed can be retried
+            hasSeededHistory.set(false)
         }
     }
 

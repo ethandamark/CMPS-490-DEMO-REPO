@@ -66,14 +66,6 @@ def upstream_error(service_name: str, response: httpx.Response) -> HTTPException
         detail=f"{service_name} upstream error: {body_preview}"
     )
 
-def generate_alert_token() -> str:
-    """
-    Generate a unique alert token for device identification.
-    Format: UUID v4 string
-    """
-    return str(uuid.uuid4())
-
-
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Return distance in km between two lat/lon points."""
     R = 6371
@@ -115,34 +107,17 @@ class PredictionResponse(BaseModel):
 class RegisterRequest(BaseModel):
     """Registration request - only device-side facts from frontend"""
     locationPermissionStatus: bool = False
+    notificationsEnabled: bool = False
     latitude: float | None = None
     longitude: float | None = None
 
 
-# ============= ALERT EVENT MODELS =============
 
-from typing import Literal
-
-class CreateAlertEventRequest(BaseModel):
-    """Create alert from ML prediction - backend only"""
-    instance_id: str | None = None
-    latitude: float
-    longitude: float
-    alert_type: Literal["storm", "flood"]
-    severity_level: int
-    expires_at: str
-
-
-class AlertEventResponse(BaseModel):
-    """Alert event data"""
-    alert_id: str
-    instance_id: str | None
-    latitude: float
-    longitude: float
 class DeviceUpdateRequest(BaseModel):
     """Update device attributes"""
     device_id: str
     location_permission_status: bool | None = None
+    notifications_enabled: bool | None = None
     last_seen_at: str | None = None
 
 
@@ -266,7 +241,7 @@ async def get_weather_maps():
 async def register_device(request: RegisterRequest):
     """
     Register a new anonymous user + device in one call.
-    Backend generates ALL identifiers: anon_user_id, device_id, alert_token.
+    Backend generates ALL identifiers: anon_user_id, device_id.
     Frontend only sends locationPermissionStatus (a device-side fact).
     """
     try:
@@ -280,7 +255,6 @@ async def register_device(request: RegisterRequest):
 
             anon_user_id = str(uuid.uuid4())
             device_id = str(uuid.uuid4())
-            alert_token = generate_alert_token()
             now = datetime.now(timezone.utc).isoformat()
 
             # --- Step 1: Create anonymous user ---
@@ -311,10 +285,10 @@ async def register_device(request: RegisterRequest):
             device_record = {
                 "device_id": device_id,
                 "anon_user_id": anon_user_id,
-                "alert_token": alert_token,
                 "platform": "android",
                 "app_version": "1.0",
                 "location_permission_status": request.locationPermissionStatus,
+                "notifications_enabled": request.notificationsEnabled,
                 "last_seen_at": now,
                 "created_at": now,
             }
@@ -360,7 +334,6 @@ async def register_device(request: RegisterRequest):
                     "success": True,
                     "userId": anon_user_id,
                     "deviceId": device_id,
-                    "alertToken": alert_token,
                 }
             else:
                 print(f"✗ Error creating device: {device_response.text}")
@@ -370,239 +343,6 @@ async def register_device(request: RegisterRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Supabase Error: {str(e)}")
-
-
-# ============= FIREBASE NOTIFICATIONS =============
-
-@app.post("/alerts/create")
-async def create_alert_event(request: CreateAlertEventRequest):
-    """
-    Create a new alert event. Called by backend ML pipeline.
-    After creating the alert, finds eligible devices and populates device_alert,
-    then attempts push notifications and updates delivery status.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            headers = {
-                "apikey": SUPABASE_API_KEY,
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            }
-
-            alert_id = str(uuid.uuid4())
-            now = datetime.now(timezone.utc).isoformat()
-
-            alert_record = {
-                "alert_id": alert_id,
-                "instance_id": request.instance_id,
-                "latitude": request.latitude,
-                "longitude": request.longitude,
-                "alert_type": request.alert_type,
-                "severity_level": request.severity_level,
-                "created_at": now,
-                "expires_at": request.expires_at,
-            }
-
-            logger.info(f"[ALERT] Creating alert: {alert_record}")
-
-            # Insert alert_event
-            response = await client.post(
-                f"{SUPABASE_BASE}/rest/v1/alert_event",
-                json=alert_record,
-                headers=headers,
-            )
-
-            if response.status_code not in [200, 201]:
-                logger.error(f"✗ Failed to create alert: {response.text}")
-                raise HTTPException(status_code=500, detail=f"Failed: {response.text}")
-
-            logger.info(f"✓ Alert created: {alert_id}")
-
-            return {
-                "success": True,
-                "alert_id": alert_id,
-                "created_at": now,
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error creating alert")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/alerts/active")
-async def get_active_alerts(lat: float | None = None, lon: float | None = None, radius_km: float = 50.0):
-    """Get all non-expired alerts, optionally filtered by location."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            
-            response = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=gt.{now}&order=severity_level.desc",
-                headers=headers,
-            )
-
-            if response.status_code == 200:
-                alerts = response.json()
-                
-                if lat is not None and lon is not None:
-                    from math import radians, cos, sin, sqrt, atan2
-                    def haversine(lat1, lon1, lat2, lon2):
-                        R = 6371
-                        dlat, dlon = radians(lat2-lat1), radians(lon2-lon1)
-                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-                        return 2 * R * atan2(sqrt(a), sqrt(1-a))
-                    alerts = [a for a in alerts if haversine(lat, lon, float(a["latitude"]), float(a["longitude"])) <= radius_km]
-
-                return {"alerts": alerts, "count": len(alerts)}
-            else:
-                raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/alerts/{alert_id}")
-async def get_alert_by_id(alert_id: str):
-    """Get a specific alert by ID."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
-            response = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/alert_event?alert_id=eq.{alert_id}",
-                headers=headers,
-            )
-            if response.status_code == 200:
-                alerts = response.json()
-                if alerts:
-                    return {"success": True, "alert": alerts[0]}
-                raise HTTPException(status_code=404, detail="Alert not found")
-            raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/alerts/{alert_id}")
-async def delete_alert(alert_id: str):
-    """Delete an alert event."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Prefer": "return=representation"}
-            response = await client.delete(
-                f"{SUPABASE_BASE}/rest/v1/alert_event?alert_id=eq.{alert_id}",
-                headers=headers,
-            )
-            if response.status_code in [200, 204]:
-                return {"success": True, "message": f"Alert {alert_id} deleted"}
-            raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============= DEVICE ALERT API =============
-
-@app.get("/device-alerts/{device_id}")
-async def get_device_alerts(device_id: str):
-    """Get all device_alert records for a specific device."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
-            response = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/device_alert?device_id=eq.{device_id}&order=sent_at.desc",
-                headers=headers,
-            )
-            if response.status_code == 200:
-                rows = response.json()
-                return {"device_alerts": rows, "count": len(rows)}
-            raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error getting device alerts")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/device-alerts/by-alert/{alert_id}")
-async def get_alert_delivery_status(alert_id: str):
-    """Get delivery status for all devices targeted by a specific alert."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"}
-            response = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{alert_id}",
-                headers=headers,
-            )
-            if response.status_code == 200:
-                rows = response.json()
-                summary = {
-                    "total": len(rows),
-                    "sent": sum(1 for r in rows if r.get("delivery_status") == "sent"),
-                    "failed": sum(1 for r in rows if r.get("delivery_status") == "failed"),
-                    "pending": sum(1 for r in rows if r.get("delivery_status") == "pending"),
-                }
-                return {"device_alerts": rows, "summary": summary}
-            raise HTTPException(status_code=500, detail=response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error getting delivery status")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/device-alerts/cleanup")
-async def cleanup_old_device_alerts(retention_days: int = 30):
-    """
-    Delete device_alert rows whose associated alert_event expired more than
-    retention_days ago. Default retention: 30 days.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {
-                "apikey": SUPABASE_API_KEY,
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            }
-
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            # Find expired alerts older than cutoff
-            alert_resp = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/alert_event?expires_at=lt.{cutoff}&select=alert_id",
-                headers=headers,
-            )
-            if alert_resp.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Failed to query alerts: {alert_resp.text}")
-
-            expired_alerts = alert_resp.json()
-            if not expired_alerts:
-                return {"success": True, "deleted": 0, "message": "No expired alerts to clean up"}
-
-            expired_ids = [a["alert_id"] for a in expired_alerts]
-
-            # Delete device_alert rows for those expired alerts
-            deleted_count = 0
-            for aid in expired_ids:
-                del_resp = await client.delete(
-                    f"{SUPABASE_BASE}/rest/v1/device_alert?alert_id=eq.{aid}",
-                    headers=headers,
-                )
-                if del_resp.status_code in [200, 204]:
-                    rows = del_resp.json() if del_resp.text else []
-                    deleted_count += len(rows) if isinstance(rows, list) else 0
-
-            logger.info(f"[CLEANUP] Deleted {deleted_count} device_alert rows (cutoff: {cutoff})")
-            return {"success": True, "deleted": deleted_count, "retention_days": retention_days}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error cleaning up device alerts")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============= DEVICE LOCATION API ============
@@ -922,6 +662,8 @@ async def update_device(request: DeviceUpdateRequest):
             update_body = {}
             if request.location_permission_status is not None:
                 update_body["location_permission_status"] = request.location_permission_status
+            if request.notifications_enabled is not None:
+                update_body["notifications_enabled"] = request.notifications_enabled
             if request.last_seen_at is not None:
                 update_body["last_seen_at"] = request.last_seen_at
             
@@ -1076,36 +818,24 @@ async def update_current_device_location(request: CreateDeviceLocationRequest):
 
 from pydantic import BaseModel as _BaseModel
 from typing import Optional as _Optional
+import json as _json
 
-class SyncSnapshotItem(_BaseModel):
-    weather_cache: dict
-    offline_snapshot: dict
 
 class SyncSnapshotsRequest(_BaseModel):
-    snapshots: list[SyncSnapshotItem]
-
-
-def _epoch_ms_to_iso(value) -> str | None:
-    """Convert epoch-millisecond long to ISO 8601 string for Postgres TIMESTAMP columns."""
-    if value is None:
-        return None
-    try:
-        ts = float(value)
-        # If the value looks like epoch milliseconds (> year-3000 as seconds), convert
-        if ts > 1e12:
-            ts = ts / 1000.0
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (TypeError, ValueError, OSError):
-        # Already a string / ISO — pass through
-        return str(value)
+    """Device sends weather_data (list of cache rows) bundled into one snapshot."""
+    weather_data: list[dict]
+    snapshot_type: str = "sync"
 
 
 @app.post("/devices/{device_id}/sync-snapshots")
 async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
     """
-    Upsert weather_cache rows then offline_weather_snapshot rows from the client.
-    Returns a success flag.
+    Create ONE snapshot row in Supabase with the device's weather_data
+    archived as JSONB.  No individual weather_cache rows are written.
     """
+    if not request.weather_data:
+        return {"success": True, "upserted": 0}
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             headers = {
@@ -1114,44 +844,37 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
                 "Prefer": "return=representation,resolution=merge-duplicates",
             }
 
-            upserted = 0
-            errors = []
-            for item in request.snapshots:
-                # Convert epoch-ms timestamps to ISO for Postgres TIMESTAMP columns
-                wc = dict(item.weather_cache)
-                if "recorded_at" in wc:
-                    wc["recorded_at"] = _epoch_ms_to_iso(wc["recorded_at"])
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            snapshot_id = str(uuid.uuid4())
 
-                wc_resp = await client.post(
-                    f"{SUPABASE_BASE}/rest/v1/weather_cache",
-                    json=wc,
-                    headers=headers,
+            snap_row = {
+                "weather_id": snapshot_id,
+                "device_id": device_id,
+                "synced_at": now_iso,
+                "is_current": True,
+                "weather_data": request.weather_data,
+                "snapshot_type": request.snapshot_type,
+            }
+
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                json=[snap_row],
+                headers=headers,
+            )
+            if resp.status_code not in [200, 201]:
+                logger.error("Snapshot upsert failed: %s %s", resp.status_code, resp.text[:500])
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"snapshot insert failed: {resp.status_code} — {resp.text[:300]}",
                 )
-                if wc_resp.status_code in [200, 201]:
-                    upserted += 1
-                else:
-                    errors.append(f"weather_cache {wc.get('cache_id')}: {wc_resp.status_code} {wc_resp.text[:200]}")
-                    logger.warning("Failed to upsert weather_cache: %s %s", wc_resp.status_code, wc_resp.text[:300])
 
-                # Upsert offline_weather_snapshot row
-                snap = {**item.offline_snapshot, "device_id": device_id}
-                # Always set synced_at to now (server-side timestamp)
-                snap["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-                snap_resp = await client.post(
-                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
-                    json=snap,
-                    headers=headers,
-                )
-                if snap_resp.status_code not in [200, 201]:
-                    errors.append(f"snapshot {snap.get('offline_weather_id')}: {snap_resp.status_code} {snap_resp.text[:200]}")
-                    logger.warning("Failed to upsert snapshot: %s %s", snap_resp.status_code, snap_resp.text[:300])
-
-            if errors:
-                logger.error("Sync errors for device %s: %s", device_id, errors)
-                raise HTTPException(status_code=502, detail={"sync_errors": errors, "upserted": upserted})
-
-            return {"success": True, "upserted": upserted}
+            logger.info("Synced snapshot %s (%d weather rows) for device %s",
+                        snapshot_id, len(request.weather_data), device_id)
+            return {
+                "success": True,
+                "upserted": len(request.weather_data),
+                "snapshot_id": snapshot_id,
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -1162,8 +885,8 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
 @app.get("/devices/{device_id}/snapshots")
 async def get_device_snapshots(device_id: str, since: str | None = None):
     """
-    Return offline_weather_snapshot rows joined with weather_cache for this device.
-    Optionally filter by recorded_at >= since (ISO 8601).
+    Return offline_weather_snapshot rows for this device.
+    Each row carries its own weather_data JSONB — no join needed.
     """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1171,11 +894,11 @@ async def get_device_snapshots(device_id: str, since: str | None = None):
 
             snapshot_url = (
                 f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
-                f"?device_id=eq.{device_id}&select=*,weather_cache(*)"
-                f"&order=weather_cache(recorded_at).desc&limit=168"
+                f"?device_id=eq.{device_id}"
+                f"&order=synced_at.desc&limit=168"
             )
             if since:
-                snapshot_url += f"&weather_cache.recorded_at=gte.{since}"
+                snapshot_url += f"&synced_at=gte.{since}"
 
             resp = await client.get(snapshot_url, headers=headers)
             if resp.status_code == 200:
@@ -1199,7 +922,7 @@ class SeedWeatherHistoryRequest(BaseModel):
 async def seed_weather_history(device_id: str, request: SeedWeatherHistoryRequest):
     """
     Fetch the past 24 hours of hourly weather from Open-Meteo for the
-    device's location, store in Supabase weather_cache + offline_weather_snapshot,
+    device's location, store ONE snapshot with weather_data JSONB in Supabase,
     and return the rows so the device can seed its local Room DB.
     """
     try:
@@ -1239,12 +962,53 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
 
             print(f"[SEED] Open-Meteo returned {len(times)} hourly rows")
 
+            # ── Fetch 7-day hourly forecast from Open-Meteo ──
+            forecast_url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={latitude}&longitude={longitude}"
+                f"&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,"
+                f"precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
+                f"&forecast_days=7&past_hours=0"
+                f"&timezone=UTC&wind_speed_unit=kmh"
+            )
+            fc_resp = await client.get(forecast_url)
+            fc_hourly = {}
+            if fc_resp.status_code == 200:
+                fc_data = fc_resp.json()
+                fc_hourly = fc_data.get("hourly", {})
+                print(f"[SEED] Open-Meteo returned {len(fc_hourly.get('time', []))} forecast rows")
+            else:
+                print(f"[SEED] ⚠ Forecast fetch failed ({fc_resp.status_code}), continuing with observations only")
+
+            fc_times = fc_hourly.get("time", [])
+            fc_temps = fc_hourly.get("temperature_2m", [])
+            fc_humidities = fc_hourly.get("relative_humidity_2m", [])
+            fc_dew_points = fc_hourly.get("dew_point_2m", [])
+            fc_precips = fc_hourly.get("precipitation", [])
+            fc_pressures = fc_hourly.get("pressure_msl", [])
+            fc_winds = fc_hourly.get("wind_speed_10m", [])
+            fc_wind_dirs = fc_hourly.get("wind_direction_10m", [])
+
             # Build weather_cache rows
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
                 "Prefer": "return=representation,resolution=merge-duplicates",
             }
+
+            # Ensure the simulation sentinel snapshot exists (survives DELETE sweeps)
+            await client.post(
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                json=[{
+                    "weather_id": "00000000-0000-0000-0000-000000000000",
+                    "device_id": None,
+                    "synced_at": None,
+                    "is_current": False,
+                    "weather_data": [],
+                    "snapshot_type": "seed",
+                }],
+                headers=headers,
+            )
 
             weather_rows = []
             for i, time_str in enumerate(times):
@@ -1256,6 +1020,12 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
 
                 def _safe(lst, idx):
                     return lst[idx] if idx < len(lst) and lst[idx] is not None else None
+
+                # Deterministic cache_id: same (lat, lon, time, type) always gets same UUID
+                cache_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{latitude:.6f}_{longitude:.6f}_{recorded_at_ms}_o"
+                ))
 
                 row = {
                     "cache_id": cache_id,
@@ -1275,45 +1045,64 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                 }
                 weather_rows.append(row)
 
-            # Upsert into Supabase weather_cache
-            if weather_rows:
-                supabase_rows = [
-                    {k: v for k, v in row.items() if k != "recorded_at_ms"}
-                    for row in weather_rows
-                ]
-                cache_resp = await client.post(
-                    f"{SUPABASE_BASE}/rest/v1/weather_cache",
-                    json=supabase_rows,
-                    headers=headers,
-                )
-                if cache_resp.status_code in [200, 201]:
-                    print(f"[SEED] \u2713 Stored {len(supabase_rows)} rows in Supabase weather_cache")
-                else:
-                    print(f"[SEED] \u26a0 weather_cache upsert: {cache_resp.status_code} — {cache_resp.text[:200]}")
+            # Build forecast weather_cache rows
+            for i, time_str in enumerate(fc_times):
+                from datetime import datetime as _dt
+                parsed_time = _dt.fromisoformat(time_str).replace(tzinfo=timezone.utc)
+                recorded_at_ms = int(parsed_time.timestamp() * 1000)
 
-                # Create offline_weather_snapshot records
+                def _safe(lst, idx):
+                    return lst[idx] if idx < len(lst) and lst[idx] is not None else None
+
+                cache_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{latitude:.6f}_{longitude:.6f}_{recorded_at_ms}_f"
+                ))
+
+                row = {
+                    "cache_id": cache_id,
+                    "temp": _safe(fc_temps, i),
+                    "humidity": _safe(fc_humidities, i),
+                    "wind_speed": _safe(fc_winds, i),
+                    "wind_direction": _safe(fc_wind_dirs, i),
+                    "precipitation_amount": _safe(fc_precips, i),
+                    "pressure": _safe(fc_pressures, i),
+                    "recorded_at": time_str,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "is_forecast": True,
+                    "dew_point_c": _safe(fc_dew_points, i),
+                    "elevation": elevation,
+                    "recorded_at_ms": recorded_at_ms,
+                }
+                weather_rows.append(row)
+
+            print(f"[SEED] Total rows (obs + forecast): {len(weather_rows)}")
+
+            # ── Create ONE snapshot with all weather rows as JSONB archive ──
+            if weather_rows:
                 now = datetime.now(timezone.utc).isoformat()
-                snapshot_rows = [
-                    {
-                        "offline_weather_id": str(uuid.uuid4()),
-                        "device_id": device_id,
-                        "cache_id": row["cache_id"],
-                        "synced_at": now,
-                        "is_current": (i == len(weather_rows) - 1),
-                    }
-                    for i, row in enumerate(weather_rows)
-                ]
+                snapshot_id = str(uuid.uuid4())
+
+                snap_row = {
+                    "weather_id": snapshot_id,
+                    "device_id": device_id,
+                    "synced_at": now,
+                    "is_current": True,
+                    "weather_data": weather_rows,          # full archive as JSONB
+                    "snapshot_type": "seed",
+                }
                 snap_resp = await client.post(
                     f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
-                    json=snapshot_rows,
+                    json=[snap_row],
                     headers=headers,
                 )
-                if snap_resp.status_code in [200, 201]:
-                    print(f"[SEED] \u2713 Stored {len(snapshot_rows)} snapshot links")
-                else:
-                    print(f"[SEED] \u26a0 snapshot upsert: {snap_resp.status_code} — {snap_resp.text[:200]}")
+                if snap_resp.status_code not in [200, 201]:
+                    logger.error("[SEED] snapshot insert failed: %s — %s", snap_resp.status_code, snap_resp.text[:300])
+                    raise HTTPException(status_code=502, detail=f"snapshot seed failed: {snap_resp.status_code}")
+                print(f"[SEED] ✓ Stored 1 snapshot ({len(weather_rows)} weather rows as JSONB)")
 
-            print(f"[SEED] \u2713 Done — returning {len(weather_rows)} rows to device")
+            print(f"[SEED] ✓ Done — returning {len(weather_rows)} rows to device")
             return {
                 "success": True,
                 "count": len(weather_rows),
@@ -1338,6 +1127,22 @@ class ModelInstanceRequest(BaseModel):
     result_level: int
     result_type: str = "storm"
     confidence_score: float
+    weather_id: str | None = None   # caller can supply (e.g. dummy UUID for simulations)
+
+
+class ModelInstanceBatchItem(BaseModel):
+    instance_id: str
+    version: str = "v1.0.0"
+    latitude: float
+    longitude: float
+    result_level: int
+    result_type: str = "storm"
+    confidence_score: float
+    created_at: int  # epoch-ms from the device
+
+
+class ModelInstanceBatchRequest(BaseModel):
+    instances: list[ModelInstanceBatchItem]
 
 
 @app.post("/devices/{device_id}/model-instance")
@@ -1345,6 +1150,7 @@ async def create_model_instance(device_id: str, request: ModelInstanceRequest):
     """
     Record a model prediction result in the model_instance table.
     Called by the Android client after each on-device ML prediction.
+    Automatically links to the most recent offline_weather_snapshot for this device.
     """
     try:
         record = {
@@ -1364,6 +1170,25 @@ async def create_model_instance(device_id: str, request: ModelInstanceRequest):
                 "Content-Type": "application/json",
                 "Prefer": "return=representation",
             }
+
+            # Use caller-supplied weather_id (e.g. dummy UUID for simulations)
+            # or fall back to the most recent snapshot for this device.
+            if request.weather_id:
+                record["weather_id"] = request.weather_id
+                logger.info("Using caller-supplied weather_id %s", request.weather_id)
+            else:
+                snap_resp = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
+                    f"?device_id=eq.{device_id}&order=synced_at.desc,weather_id.desc&limit=1"
+                    f"&select=weather_id",
+                    headers={"apikey": SUPABASE_API_KEY},
+                )
+                if snap_resp.status_code == 200:
+                    rows = snap_resp.json()
+                    if rows:
+                        record["weather_id"] = rows[0]["weather_id"]
+                        logger.info("Linked model_instance to snapshot %s", record["weather_id"])
+
             resp = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/model_instance",
                 json=record,
@@ -1381,6 +1206,73 @@ async def create_model_instance(device_id: str, request: ModelInstanceRequest):
         raise
     except Exception as e:
         logger.exception("Error creating model_instance")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/devices/{device_id}/sync-model-instances")
+async def sync_model_instances(device_id: str, request: ModelInstanceBatchRequest):
+    """
+    Batch-sync locally queued model instances from the Android client.
+    Accepts an array of model instance records and upserts them to Supabase.
+    """
+    if not request.instances:
+        return {"success": True, "synced": 0}
+
+    try:
+        records = []
+        for item in request.instances:
+            created_at = datetime.fromtimestamp(
+                item.created_at / 1000.0, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            records.append({
+                "instance_id": item.instance_id,
+                "version": item.version,
+                "latitude": item.latitude,
+                "longitude": item.longitude,
+                "result_level": max(0, min(5, item.result_level)),
+                "result_type": item.result_type,
+                "confidence_score": round(item.confidence_score, 4),
+                "created_at": created_at,
+            })
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation,resolution=merge-duplicates",
+            }
+
+            # Look up the most recent snapshot for this device to link all instances
+            snap_resp = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
+                f"?device_id=eq.{device_id}&order=synced_at.desc,weather_id.desc&limit=1"
+                f"&select=weather_id",
+                headers={"apikey": SUPABASE_API_KEY},
+            )
+            if snap_resp.status_code == 200:
+                rows = snap_resp.json()
+                if rows:
+                    snap_id = rows[0]["weather_id"]
+                    for rec in records:
+                        rec["weather_id"] = snap_id
+
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/model_instance",
+                json=records,
+                headers=headers,
+            )
+            if resp.status_code not in [200, 201]:
+                logger.error("model_instance batch insert failed: %s %s",
+                             resp.status_code, resp.text[:300])
+                raise HTTPException(status_code=502, detail=f"Supabase error: {resp.text[:200]}")
+
+        logger.info("Synced %d model instances for device %s", len(records), device_id)
+        return {"success": True, "synced": len(records)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error syncing model instances")
         raise HTTPException(status_code=500, detail=str(e))
 
 

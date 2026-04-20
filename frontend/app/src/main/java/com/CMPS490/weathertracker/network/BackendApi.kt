@@ -75,6 +75,12 @@ interface BackendApi {
         @Body request: JsonObject,
     ): Call<JsonObject>
 
+    @POST("devices/{device_id}/sync-model-instances")
+    fun syncModelInstances(
+        @Path("device_id") deviceId: String,
+        @Body request: JsonObject,
+    ): Call<JsonObject>
+
     // ===== DEVICE LOCATION =====
     
     /**

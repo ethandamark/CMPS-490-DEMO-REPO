@@ -23,29 +23,27 @@ if not schema_exists:
         cur.execute(fh.read())
     print("  OK\n")
 
-    # Apply RLS policies
-    print("Enabling RLS...")
-    with open("enable_rls.sql") as fh:
-        cur.execute(fh.read())
-    print("  OK")
-    with open("fix_rls_public_access.sql") as fh:
-        cur.execute(fh.read())
-    print("  OK\n")
+    # create_schema.sql already includes RLS policies, role grants,
+    # sentinel data, and reflects the final state of all existing
+    # migrations, so skip them on a fresh install.
+    print("Fresh install — skipping existing migrations (already in base schema).\n")
 
-files = sorted(glob.glob("migrations/*.sql"))
-print(f"Found {len(files)} migration files\n")
+else:
+    # Existing database — apply any new migrations
+    files = sorted(glob.glob("migrations/*.sql"))
+    print(f"Found {len(files)} migration files\n")
 
-for f in files:
-    print(f"Applying {f}...")
-    try:
-        with open(f) as fh:
-            sql = fh.read()
-        cur.execute(sql)
-        print("  OK")
-    except Exception as e:
-        print(f"  WARN: {e}")
-        conn.rollback()
-        conn.autocommit = True
+    for f in files:
+        print(f"Applying {f}...")
+        try:
+            with open(f) as fh:
+                sql = fh.read()
+            cur.execute(sql)
+            print("  OK")
+        except Exception as e:
+            print(f"  WARN: {e}")
+            conn.rollback()
+            conn.autocommit = True
 
 print("\n--- Verifying tables ---")
 cur.execute(

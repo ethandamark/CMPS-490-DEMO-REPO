@@ -114,8 +114,8 @@ class SnapshotSyncWorker(
             return Result.success()
         }
 
-        // Build payload
-        val snapshotsArray = JsonArray()
+        // Bundle all unsynced cache rows into ONE weather_data JSONB array
+        val weatherDataArray = JsonArray()
         for (item in unsynced) {
             val cacheJson = JsonObject().apply {
                 addProperty("cache_id", item.cache.cacheId)
@@ -141,25 +141,20 @@ class SnapshotSyncWorker(
                 addProperty("nwp_available_leads", item.cache.nwpAvailableLeads)
                 addProperty("mrms_max_dbz_75km", item.cache.mrmsMaxDbz75km)
             }
-            val snapshotJson = JsonObject().apply {
-                addProperty("offline_weather_id", item.snapshot.offlineWeatherId)
-                addProperty("device_id", item.snapshot.deviceId)
-                addProperty("cache_id", item.snapshot.cacheId)
-                addProperty("is_current", item.snapshot.isCurrent)
-            }
-            val entry = JsonObject().apply {
-                add("weather_cache", cacheJson)
-                add("offline_snapshot", snapshotJson)
-            }
-            snapshotsArray.add(entry)
+            weatherDataArray.add(cacheJson)
         }
 
-        // Bridge the callback-based Retrofit call into a coroutine result
-        val ids = unsynced.map { it.snapshot.offlineWeatherId }
+        // Send ONE snapshot with all weather data bundled as JSONB
+        val body = JsonObject().apply {
+            add("weather_data", weatherDataArray)
+            addProperty("snapshot_type", "sync")
+        }
+
+        val ids = unsynced.map { it.snapshot.weatherId }
         val syncResult = kotlinx.coroutines.suspendCancellableCoroutine<kotlin.Result<Unit>> { cont ->
             BackendRepository.syncSnapshots(
                 deviceId = deviceId,
-                snapshotsJson = snapshotsArray,
+                body = body,
                 onSuccess = { _ -> cont.resume(kotlin.Result.success(Unit)) {} },
                 onError = { e -> cont.resume(kotlin.Result.failure(e)) {} },
             )

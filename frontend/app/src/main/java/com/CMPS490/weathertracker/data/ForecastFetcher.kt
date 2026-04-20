@@ -25,6 +25,46 @@ class ForecastFetcher(
         const val WORK_NAME = "forecast_fetcher_periodic"
         private const val MILLIS_PER_HOUR = 3_600_000L
         private const val FORECAST_RETENTION_MS = 7L * 24 * MILLIS_PER_HOUR
+
+        /**
+         * Build a deterministic cache_id from location + time + forecast flag.
+         * Uses UUID v5 (SHA-1) with URL namespace to match the backend's uuid.uuid5().
+         * This ensures re-fetches upsert the same row instead of creating duplicates.
+         */
+        fun deterministicCacheId(lat: Double, lon: Double, recordedAtMs: Long, isForecast: Boolean): String {
+            val tag = if (isForecast) "f" else "o"
+            val raw = "${"%.6f".format(lat)}_${"%.6f".format(lon)}_${recordedAtMs}_$tag"
+            // UUID v5: SHA-1 with NAMESPACE_URL (same as Python uuid.uuid5(uuid.NAMESPACE_URL, ...))
+            val nsBytes = uuidToBytes(UUID.fromString("6ba7b811-9dad-11d1-80b4-00c04fd430c8"))
+            val data = nsBytes + raw.toByteArray(Charsets.UTF_8)
+            val sha1 = java.security.MessageDigest.getInstance("SHA-1").digest(data)
+            sha1[6] = ((sha1[6].toInt() and 0x0f) or 0x50).toByte()  // version 5
+            sha1[8] = ((sha1[8].toInt() and 0x3f) or 0x80).toByte()  // variant RFC 4122
+            val hex = sha1.take(16).joinToString("") { "%02x".format(it) }
+            return "${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20,32)}"
+        }
+
+        /**
+         * Derive a deterministic snapshot UUID from a cache_id.
+         * Uses UUID v5(NAMESPACE_URL, cacheId + "_snap") so it's always a valid UUID.
+         */
+        fun deterministicSnapshotId(cacheId: String): String {
+            val raw = cacheId + "_snap"
+            val nsBytes = uuidToBytes(UUID.fromString("6ba7b811-9dad-11d1-80b4-00c04fd430c8"))
+            val data = nsBytes + raw.toByteArray(Charsets.UTF_8)
+            val sha1 = java.security.MessageDigest.getInstance("SHA-1").digest(data)
+            sha1[6] = ((sha1[6].toInt() and 0x0f) or 0x50).toByte()
+            sha1[8] = ((sha1[8].toInt() and 0x3f) or 0x80).toByte()
+            val hex = sha1.take(16).joinToString("") { "%02x".format(it) }
+            return "${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20,32)}"
+        }
+
+        private fun uuidToBytes(uuid: UUID): ByteArray {
+            val buf = java.nio.ByteBuffer.allocate(16)
+            buf.putLong(uuid.mostSignificantBits)
+            buf.putLong(uuid.leastSignificantBits)
+            return buf.array()
+        }
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -63,7 +103,7 @@ class ForecastFetcher(
             // Link forecast rows to offline_weather_snapshot for this device
             val snapshotEntities = forecastRows.map { row ->
                 OfflineWeatherSnapshotEntity(
-                    offlineWeatherId = UUID.randomUUID().toString(),
+                    weatherId = deterministicSnapshotId(row.cacheId),
                     deviceId = deviceId,
                     cacheId = row.cacheId,
                     syncedAt = null,
@@ -94,7 +134,7 @@ class ForecastFetcher(
             "?latitude=$latitude&longitude=$longitude" +
             "&timezone=UTC&wind_speed_unit=kmh&forecast_days=7" +
             "&hourly=temperature_2m,relative_humidity_2m,dew_point_2m," +
-            "precipitation,pressure_msl,wind_speed_10m"
+            "precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
 
         val request = Request.Builder().url(url).build()
         val response = httpClient.newCall(request).execute()
@@ -114,6 +154,7 @@ class ForecastFetcher(
         val precips = hourly.getJSONArray("precipitation")
         val pressures = hourly.getJSONArray("pressure_msl")
         val winds = hourly.getJSONArray("wind_speed_10m")
+        val windDirs = hourly.getJSONArray("wind_direction_10m")
 
         val nowMs = System.currentTimeMillis()
         val result = mutableListOf<WeatherCacheEntity>()
@@ -127,11 +168,11 @@ class ForecastFetcher(
 
             result.add(
                 WeatherCacheEntity(
-                    cacheId = UUID.randomUUID().toString(),
+                    cacheId = deterministicCacheId(latitude, longitude, epochMs, true),
                     temp = temps.optDouble(i).takeUnless { it.isNaN() },
                     humidity = humidities.optDouble(i).takeUnless { it.isNaN() },
                     windSpeed = winds.optDouble(i).takeUnless { it.isNaN() },
-                    windDirection = null,
+                    windDirection = windDirs.optDouble(i).takeUnless { it.isNaN() },
                     precipitationAmount = precips.optDouble(i).takeUnless { it.isNaN() },
                     pressure = pressures.optDouble(i).takeUnless { it.isNaN() },
                     recordedAt = epochMs,

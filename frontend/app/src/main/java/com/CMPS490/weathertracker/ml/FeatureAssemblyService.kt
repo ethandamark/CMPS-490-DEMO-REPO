@@ -33,7 +33,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
         )
 
         private const val DEG_PER_KM = 0.009   // ~1 km in degrees (for bounding box)
-        private const val HISTORY_RADIUS_KM = 50.0
+        private const val HISTORY_RADIUS_KM = 5.0
 
         /**
          * Fallback dew point offset when actual dew point data is unavailable.
@@ -45,15 +45,17 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
 
     /**
      * Build the feature vector for the most recent snapshot at [latitude]/[longitude].
+     * Prefers observations but falls back to forecast data when fewer than 6
+     * observation rows are available (e.g. device has been offline).
      * Returns a Map<featureName, Float?> where null means the value is unavailable
-     * (the predictor fills nulls with 0).
+     * (the predictor fills nulls with imputer medians).
      */
     suspend fun assembleFeatures(
         latitude: Double,
         longitude: Double,
     ): Map<String, Float?> {
         val delta = HISTORY_RADIUS_KM * DEG_PER_KM
-        val history = db.weatherCacheDao().getObservationsNear(
+        val observations = db.weatherCacheDao().getObservationsNear(
             latMin = latitude - delta,
             latMax = latitude + delta,
             lonMin = longitude - delta,
@@ -61,15 +63,48 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
             limit = 48,
         )
 
+        val history: List<WeatherCacheEntity>
+        val dataSource: String
+
+        if (observations.size >= 6) {
+            // Enough observations — use them exclusively
+            history = observations
+            dataSource = "observations"
+        } else {
+            // Offline / insufficient observations — supplement with forecasts.
+            // Pull forecasts covering the past 48 h through the next hour so we have
+            // a coherent timeline: past observations + the nearest forecast at or
+            // just after "now" acts as the current data point.
+            val nowMs = System.currentTimeMillis()
+            val hourMs = (nowMs / 3_600_000L) * 3_600_000L  // round down to current hour
+            val forecasts = db.weatherCacheDao().getForecastsFrom(
+                latMin = latitude - delta,
+                latMax = latitude + delta,
+                lonMin = longitude - delta,
+                lonMax = longitude + delta,
+                fromTime = nowMs - 48 * 3_600_000L,
+            )
+            // Merge: observations first, then forecasts, deduplicate by recordedAt.
+            // Only include forecasts up to the current hour so the model doesn't
+            // "see" future data as if it were the present.
+            val cutoff = hourMs
+            val seen = observations.map { it.recordedAt }.toSet()
+            val usableForecasts = forecasts
+                .filter { it.recordedAt !in seen && it.recordedAt <= cutoff }
+            val merged = observations + usableForecasts
+            history = merged.ifEmpty { observations }
+            dataSource = if (usableForecasts.isNotEmpty()) "observations+forecasts" else "observations"
+        }
+
         if (history.isEmpty()) {
-            Log.w(TAG, "No observation history found near ($latitude, $longitude)")
+            Log.w(TAG, "No weather history found near ($latitude, $longitude)")
             return emptyMap()
         }
 
         // Sort oldest → newest
         val sorted = history.sortedBy { it.recordedAt }
         val current = sorted.last()
-        Log.d(TAG, "📊 Using ${sorted.size} snapshots for prediction (oldest=${sorted.first().recordedAt}, newest=${current.recordedAt})")
+        Log.d(TAG, "📊 Using ${sorted.size} rows ($dataSource) for prediction (oldest=${sorted.first().recordedAt}, newest=${current.recordedAt})")
 
         // Map DB column names to model feature names
         val tempC = current.temp?.toFloat()
