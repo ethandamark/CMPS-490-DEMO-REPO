@@ -140,6 +140,7 @@ object BackendRepository {
      */
     fun register(
         locationPermissionStatus: Boolean = false,
+        notificationsEnabled: Boolean = false,
         latitude: Double? = null,
         longitude: Double? = null,
         onSuccess: (userId: String, deviceId: String) -> Unit,
@@ -147,9 +148,10 @@ object BackendRepository {
     ) {
         try {
             Log.d(TAG, "→ Requesting backend to register user + device...")
-            Log.d(TAG, "  locationPermissionStatus=$locationPermissionStatus, lat=$latitude, lon=$longitude")
+            Log.d(TAG, "  locationPermissionStatus=$locationPermissionStatus, notificationsEnabled=$notificationsEnabled, lat=$latitude, lon=$longitude")
             val record = JsonObject().apply {
                 addProperty("locationPermissionStatus", locationPermissionStatus)
+                addProperty("notificationsEnabled", notificationsEnabled)
                 latitude?.let { addProperty("latitude", it) }
                 longitude?.let { addProperty("longitude", it) }
             }
@@ -187,7 +189,6 @@ object BackendRepository {
         deviceId: String,
         locationPermissionStatus: Boolean? = null,
         notificationsEnabled: Boolean? = null,
-        lastSeenAt: String? = null,
         onSuccess: () -> Unit,
         onError: (Exception) -> Unit
     ) {
@@ -197,7 +198,6 @@ object BackendRepository {
                 addProperty("device_id", deviceId)
                 locationPermissionStatus?.let { addProperty("location_permission_status", it) }
                 notificationsEnabled?.let { addProperty("notifications_enabled", it) }
-                lastSeenAt?.let { addProperty("last_seen_at", it) }
             }
             
             val call = api.updateDevice(record)

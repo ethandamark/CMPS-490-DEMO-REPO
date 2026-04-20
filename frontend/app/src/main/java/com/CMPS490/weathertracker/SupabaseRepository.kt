@@ -13,8 +13,6 @@ data class AnonymousUserRecord(
     val createdAt: String = Instant.now().toString(),
     @SerializedName("last_active_at")
     val lastActiveAt: String? = null,
-    @SerializedName("notification_opt_in")
-    val notificationOptIn: Boolean? = null,
     @SerializedName("status")
     val status: String = "active"
 )
@@ -29,18 +27,12 @@ data class DeviceRecord(
     @SerializedName("app_version")
     val appVersion: String = "1.0",
     @SerializedName("location_permission_status")
-    val locationPermissionStatus: Boolean? = null,
-    @SerializedName("last_seen_at")
-    val lastSeenAt: String? = null,
-    @SerializedName("created_at")
-    val createdAt: String = Instant.now().toString()
+    val locationPermissionStatus: Boolean? = null
 )
 
 data class DeviceUpdateRecord(
     @SerializedName("location_permission_status")
-    val locationPermissionStatus: Boolean? = null,
-    @SerializedName("last_seen_at")
-    val lastSeenAt: String? = null
+    val locationPermissionStatus: Boolean? = null
 )
 
 object SupabaseRepository {
@@ -64,16 +56,12 @@ object SupabaseRepository {
 
     suspend fun updateDevice(
         deviceId: String,
-        locationPermissionStatus: Boolean? = null,
-        lastSeenAt: String? = null
+        locationPermissionStatus: Boolean? = null
     ): Result<Unit> {
         return try {
             Log.d(TAG, "→ Updating device: $deviceId")
             if (locationPermissionStatus != null) {
                 Log.d(TAG, "  - Location permission status: $locationPermissionStatus")
-            }
-            if (lastSeenAt != null) {
-                Log.d(TAG, "  - Last seen at: $lastSeenAt")
             }
             
             // Call BackendRepository.updateDevice() using suspendCancellableCoroutine
@@ -81,7 +69,6 @@ object SupabaseRepository {
                 BackendRepository.updateDevice(
                     deviceId = deviceId,
                     locationPermissionStatus = locationPermissionStatus,
-                    lastSeenAt = lastSeenAt,
                     onSuccess = {
                         Log.d(TAG, "✓ Device updated successfully: $deviceId")
                         continuation.resume(Result.success(Unit))

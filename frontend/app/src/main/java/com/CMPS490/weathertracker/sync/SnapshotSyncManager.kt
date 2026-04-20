@@ -107,16 +107,28 @@ class SnapshotSyncWorker(
         }
 
         val db = WeatherDatabase.getInstance(applicationContext)
-        val unsynced = db.offlineWeatherSnapshotDao().getUnsyncedSnapshots(deviceId)
 
-        if (unsynced.isEmpty()) {
-            Log.d(TAG, "No unsynced snapshots")
+        // Send ALL cached snapshots (observations + forecasts) so the backend gets full history
+        val allSnapshots = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 250)
+
+        if (allSnapshots.isEmpty()) {
+            Log.d(TAG, "No snapshots to sync")
             return Result.success()
         }
 
-        // Bundle all unsynced cache rows into ONE weather_data JSONB array
+        // Find which ones haven't been synced yet (to mark after success)
+        val unsyncedIds = allSnapshots
+            .filter { it.snapshot.syncedAt == null }
+            .map { it.snapshot.weatherId }
+
+        if (unsyncedIds.isEmpty()) {
+            Log.d(TAG, "All snapshots already synced")
+            return Result.success()
+        }
+
+        // Bundle ALL cache rows into ONE weather_data JSONB array
         val weatherDataArray = JsonArray()
-        for (item in unsynced) {
+        for (item in allSnapshots) {
             val cacheJson = JsonObject().apply {
                 addProperty("cache_id", item.cache.cacheId)
                 addProperty("temp", item.cache.temp)
@@ -150,7 +162,7 @@ class SnapshotSyncWorker(
             addProperty("snapshot_type", "sync")
         }
 
-        val ids = unsynced.map { it.snapshot.weatherId }
+        val ids = unsyncedIds
         val syncResult = kotlinx.coroutines.suspendCancellableCoroutine<kotlin.Result<Unit>> { cont ->
             BackendRepository.syncSnapshots(
                 deviceId = deviceId,
@@ -162,7 +174,7 @@ class SnapshotSyncWorker(
 
         return if (syncResult.isSuccess) {
             db.offlineWeatherSnapshotDao().markSynced(ids, System.currentTimeMillis())
-            Log.i(TAG, "✓ Synced ${ids.size} snapshots to backend")
+            Log.i(TAG, "✓ Synced ${allSnapshots.size} snapshots (${ids.size} newly marked) to backend")
             Result.success()
         } else {
             Log.e(TAG, "✗ Sync failed: ${syncResult.exceptionOrNull()?.message}")

@@ -18,6 +18,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.CountDownLatch
+import android.os.Build
+import androidx.core.app.NotificationManagerCompat
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
@@ -61,6 +63,15 @@ class AuthenticationService(private val context: Context) {
             context, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
         Log.d(TAG, "  Location permission granted: $hasLocationPermission")
+
+        val hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        }
+        Log.d(TAG, "  Notification permission granted: $hasNotificationPermission")
 
         // Get device location if permission granted
         var latitude: Double? = null
@@ -112,6 +123,7 @@ class AuthenticationService(private val context: Context) {
 
         BackendRepository.register(
             locationPermissionStatus = hasLocationPermission,
+            notificationsEnabled = hasNotificationPermission,
             latitude = latitude,
             longitude = longitude,
             onSuccess = { userId, devId ->

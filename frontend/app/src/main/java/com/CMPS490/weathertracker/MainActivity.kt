@@ -303,6 +303,20 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Check notification permission when returning from Settings
+                LaunchedEffect(notificationsGranted) {
+                    if (notificationsGranted && notificationPromptAnswered) {
+                        storedDeviceId?.let { deviceId ->
+                            BackendRepository.updateDevice(
+                                deviceId = deviceId,
+                                notificationsEnabled = true,
+                                onSuccess = { Log.d("MainActivity", "✓ notifications_enabled set to true") },
+                                onError = { e -> Log.e("MainActivity", "✗ Failed to update notifications_enabled: ${e.message}") }
+                            )
+                        }
+                    }
+                }
+
                 // Start background location service when all permissions are granted
                 LaunchedEffect(
                     locationPermissionState.allPermissionsGranted,
@@ -835,31 +849,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        Log.d("MainActivity", "→ App paused - updating last_seen_at timestamp")
+        Log.d("MainActivity", "→ App paused - refreshing last_active_at via heartbeat")
         
-        // Update last_seen_at when app is paused/closed
+        // Heartbeat: backend updates anonymous_user.last_active_at automatically
         lifecycleScope.launch {
             try {
                 val authService = AuthenticationService(this@MainActivity)
                 val deviceId = authService.getStoredDeviceId()
                 
                 if (deviceId != null) {
-                    val currentTimestamp = Instant.now().toString()
                     val result = SupabaseRepository.updateDevice(
-                        deviceId = deviceId,
-                        lastSeenAt = currentTimestamp
+                        deviceId = deviceId
                     )
                     
                     if (result.isSuccess) {
-                        Log.d("MainActivity", "✓ Updated last_seen_at: $currentTimestamp")
+                        Log.d("MainActivity", "✓ Heartbeat sent for device: $deviceId")
                     } else {
-                        Log.e("MainActivity", "✗ Failed to update last_seen_at: ${result.exceptionOrNull()?.message}")
+                        Log.e("MainActivity", "✗ Failed to send heartbeat: ${result.exceptionOrNull()?.message}")
                     }
                 } else {
-                    Log.d("MainActivity", "⚠ No device ID found - skipping last_seen_at update")
+                    Log.d("MainActivity", "⚠ No device ID found - skipping heartbeat")
                 }
             } catch (e: Exception) {
-                Log.e("MainActivity", "✗ Error updating last_seen_at: ${e.message}", e)
+                Log.e("MainActivity", "✗ Error sending heartbeat: ${e.message}", e)
             }
         }
     }

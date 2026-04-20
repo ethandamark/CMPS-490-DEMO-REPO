@@ -118,7 +118,6 @@ class DeviceUpdateRequest(BaseModel):
     device_id: str
     location_permission_status: bool | None = None
     notifications_enabled: bool | None = None
-    last_seen_at: str | None = None
 
 
 # ============= DEVICE LOCATION MODELS =============
@@ -263,7 +262,6 @@ async def register_device(request: RegisterRequest):
                 "status": "active",
                 "created_at": now,
                 "last_active_at": now,
-                "notification_opt_in": True,
             }
 
             print(f"[REGISTER] Creating NEW anonymous user: {user_record}")
@@ -289,8 +287,6 @@ async def register_device(request: RegisterRequest):
                 "app_version": "1.0",
                 "location_permission_status": request.locationPermissionStatus,
                 "notifications_enabled": request.notificationsEnabled,
-                "last_seen_at": now,
-                "created_at": now,
             }
 
             print(f"[REGISTER] Creating device: {device_record}")
@@ -638,68 +634,71 @@ async def get_latest_device_location(device_id: str):
 @app.patch("/supabase/device")
 async def update_device(request: DeviceUpdateRequest):
     """
-    Update device attributes like location_permission_status and last_seen_at.
-    Only updates fields that are provided (not None).
-    Corresponds to: PATCH /rest/v1/device
+    Update device attributes and refresh anonymous_user.last_active_at.
+    Also reactivates the account if it was marked inactive.
     """
     try:
         print(f"\n[UPDATE-DEVICE] Received request:")
         print(f"  device_id: {request.device_id}")
         if request.location_permission_status is not None:
             print(f"  location_permission_status: {request.location_permission_status}")
-        if request.last_seen_at is not None:
-            print(f"  last_seen_at: {request.last_seen_at}")
         print(f"  Supabase URL: {SUPABASE_BASE}")
-        
+
+        now = datetime.now(timezone.utc).isoformat()
+
         async with httpx.AsyncClient() as client:
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
                 "Prefer": "return=representation"
             }
-            
-            # Build update body with only provided fields
-            update_body = {}
+
+            # --- 1. Update device-specific fields (if any) ---
+            device_body = {}
             if request.location_permission_status is not None:
-                update_body["location_permission_status"] = request.location_permission_status
+                device_body["location_permission_status"] = request.location_permission_status
             if request.notifications_enabled is not None:
-                update_body["notifications_enabled"] = request.notifications_enabled
-            if request.last_seen_at is not None:
-                update_body["last_seen_at"] = request.last_seen_at
-            
-            if not update_body:
-                return {
-                    "success": False,
-                    "error": "No fields to update"
-                }
-            
-            patch_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}"
-            
-            print(f"[PATCH] URL: {patch_url}")
-            print(f"[PATCH] Body: {update_body}")
-            
-            patch_response = await client.patch(
-                patch_url,
-                json=update_body,
-                headers=headers
-            )
-            
-            print(f"[PATCH] Status: {patch_response.status_code}")
-            print(f"[PATCH] Response: {patch_response.text[:200]}")
-            
-            if patch_response.status_code in [200, 201, 204]:
-                print(f"✓ Device updated successfully for: {request.device_id}")
-                return {
-                    "success": True,
-                    "message": "Device updated successfully",
-                    "device_id": request.device_id
-                }
-            else:
-                print(f"✗ Error updating device: {patch_response.text}")
-                return {
-                    "success": False,
-                    "error": f"Failed to update device: {patch_response.text}"
-                }
+                device_body["notifications_enabled"] = request.notifications_enabled
+
+            if device_body:
+                patch_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}"
+                print(f"[PATCH device] URL: {patch_url}")
+                print(f"[PATCH device] Body: {device_body}")
+
+                patch_response = await client.patch(
+                    patch_url, json=device_body, headers=headers
+                )
+                print(f"[PATCH device] Status: {patch_response.status_code}")
+                if patch_response.status_code not in [200, 201, 204]:
+                    print(f"✗ Error updating device: {patch_response.text}")
+                    return {"success": False, "error": f"Failed to update device: {patch_response.text}"}
+
+            # --- 2. Look up anon_user_id from device ---
+            lookup_url = f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{request.device_id}&select=anon_user_id"
+            lookup_resp = await client.get(lookup_url, headers=headers)
+            devices = lookup_resp.json()
+            if not devices:
+                return {"success": False, "error": "Device not found"}
+            anon_user_id = devices[0]["anon_user_id"]
+
+            # --- 3. Update anonymous_user.last_active_at & reactivate ---
+            user_url = f"{SUPABASE_BASE}/rest/v1/anonymous_user?anon_user_id=eq.{anon_user_id}"
+            user_body = {"last_active_at": now, "status": "active"}
+            print(f"[PATCH user] URL: {user_url}")
+            print(f"[PATCH user] Body: {user_body}")
+
+            user_resp = await client.patch(user_url, json=user_body, headers=headers)
+            print(f"[PATCH user] Status: {user_resp.status_code}")
+            if user_resp.status_code not in [200, 201, 204]:
+                print(f"✗ Error updating anonymous_user: {user_resp.text}")
+                return {"success": False, "error": f"Failed to update user: {user_resp.text}"}
+
+            print(f"✓ Device updated, last_active_at refreshed for user {anon_user_id}")
+            return {
+                "success": True,
+                "message": "Device updated successfully",
+                "device_id": request.device_id
+            }
     except Exception as e:
         print(f"✗ Exception in update_device: {str(e)}")
         import traceback
