@@ -587,6 +587,18 @@ class MainActivity : ComponentActivity() {
                         return@LaunchedEffect
                     }
 
+                    // If backend is already known to be down, fetch from Open-Meteo immediately
+                    if (!backendConnected) {
+                        val label = locationName.ifBlank { "Current Location" }
+                        val fallback = OpenMeteoFallback.fetch(lat, lon, label)
+                        if (fallback != null) {
+                            currentWeather = fallback.current
+                            forecastWeather = fallback.forecast
+                            Log.d("MainActivity", "✓ Open-Meteo fallback loaded for $requestKey")
+                        }
+                        return@LaunchedEffect
+                    }
+
                     var requestAlert: WeatherAlertUiModel? = null
 
                     // Get weather alerts from backend
