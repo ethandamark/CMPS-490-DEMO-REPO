@@ -797,7 +797,9 @@ class LocationTrackingService : Service() {
                         weatherId = deterministicSnapshotId(cacheId),
                         deviceId = deviceId,
                         cacheId = cacheId,
-                        syncedAt = null,
+                        // Mark as already synced — this data came FROM the backend,
+                        // so SnapshotSyncWorker must not send it back again.
+                        syncedAt = System.currentTimeMillis(),
                         isCurrent = false,
                     )
                 )

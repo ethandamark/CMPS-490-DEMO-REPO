@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
@@ -32,6 +33,7 @@ object SnapshotSyncManager {
 
     private const val TAG = "SnapshotSyncManager"
     const val SYNC_WORK_NAME = "snapshot_sync_periodic"
+    const val SYNC_IMMEDIATE_WORK_NAME = "snapshot_sync_immediate"
 
     fun init(context: Context) {
         schedulePeriodicSync(context)
@@ -64,8 +66,14 @@ object SnapshotSyncManager {
             .setConstraints(constraints)
             .build()
 
-        WorkManager.getInstance(context).enqueue(request)
-        Log.d(TAG, "One-shot sync enqueued")
+        // KEEP ensures that if a sync is already queued or running (e.g. from a
+        // rapid series of WiFi callbacks), we do not enqueue a second concurrent worker.
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            SYNC_IMMEDIATE_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+        Log.d(TAG, "One-shot sync enqueued (deduplicated)")
     }
 
     private fun registerWifiCallback(context: Context) {
