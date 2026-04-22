@@ -31,6 +31,11 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+
+def deterministic_location_id(device_id: str) -> str:
+    """Build a stable UUID for each device's current-location row."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"device-location:{device_id}"))
+
 app = FastAPI(title="Weather Tracker API", version="1.0.0")
 
 # Enable CORS
@@ -303,11 +308,11 @@ async def register_device(request: RegisterRequest):
             if device_response.status_code in [200, 201]:
                 print(f"✓ Registered: user={anon_user_id}, device={device_id}")
                 
-                # AUTO-POPULATE DEVICE LOCATION if permission granted + coords provided
+                # Upsert device location so startup races cannot create duplicate rows.
                 if request.locationPermissionStatus and request.latitude is not None and request.longitude is not None:
-                    print(f"[REGISTER] Auto-creating device_location (permission=true, coords provided)")
+                    print(f"[REGISTER] Upserting device_location (permission=true, coords provided)")
                     location_record = {
-                        "location_id": str(uuid.uuid4()),
+                        "location_id": deterministic_location_id(device_id),
                         "device_id": device_id,
                         "latitude": request.latitude,
                         "longitude": request.longitude,
@@ -315,14 +320,17 @@ async def register_device(request: RegisterRequest):
                     }
                     print(f"[REGISTER] location_record: {location_record}")
                     loc_response = await client.post(
-                        f"{SUPABASE_BASE}/rest/v1/device_location",
+                        f"{SUPABASE_BASE}/rest/v1/device_location?on_conflict=device_id",
                         json=location_record,
-                        headers=headers,
+                        headers={
+                            **headers,
+                            "Prefer": "return=representation,resolution=merge-duplicates",
+                        },
                     )
                     if loc_response.status_code in [200, 201]:
-                        print(f"✓ Device location auto-created: {location_record['location_id']}")
+                        print(f"✓ Device location upserted: {location_record['location_id']}")
                     else:
-                        print(f"✗ Failed to auto-create device_location: {loc_response.text}")
+                        print(f"✗ Failed to upsert device_location: {loc_response.text}")
                 else:
                     print(f"[REGISTER] Skipping device_location: permission={request.locationPermissionStatus}, lat={request.latitude}, lon={request.longitude}")
                 
@@ -708,10 +716,9 @@ async def update_device(request: DeviceUpdateRequest):
 @app.post("/device-location/update-current")
 async def update_current_device_location(request: CreateDeviceLocationRequest):
     """
-    Update or create the current location for a device (upsert behavior).
+    Upsert the current location for a device.
     Used by background location tracking service.
-    - If a location exists for the device, updates it
-    - If no location exists, creates a new one
+    - Maintains one location row per device.
     """
     try:
         print(f"\n{'='*60}")
@@ -725,83 +732,40 @@ async def update_current_device_location(request: CreateDeviceLocationRequest):
             headers = {
                 "apikey": SUPABASE_API_KEY,
                 "Content-Type": "application/json",
-                "Prefer": "return=representation",
+                "Prefer": "return=representation,resolution=merge-duplicates",
             }
             
             now = datetime.now(timezone.utc).isoformat()
-            
-            # Check if location exists for this device
-            existing_response = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/device_location?device_id=eq.{request.device_id}&order=captured_at.desc&limit=1",
+
+            location_id = deterministic_location_id(request.device_id)
+            location_record = {
+                "location_id": location_id,
+                "device_id": request.device_id,
+                "latitude": request.latitude,
+                "longitude": request.longitude,
+                "captured_at": now,
+            }
+
+            response = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/device_location?on_conflict=device_id",
+                json=location_record,
                 headers=headers,
             )
-            existing_locs = existing_response.json() if existing_response.status_code == 200 else []
-            
-            if existing_locs:
-                # Update existing location
-                existing_loc = existing_locs[0]
-                location_id = existing_loc["location_id"]
-                print(f"[UPDATE-CURRENT] Updating existing location: {location_id}")
-                print(f"  Old: lat={existing_loc.get('latitude')}, lon={existing_loc.get('longitude')}")
-                print(f"  New: lat={request.latitude}, lon={request.longitude}")
-                
-                response = await client.patch(
-                    f"{SUPABASE_BASE}/rest/v1/device_location?location_id=eq.{location_id}",
-                    json={
-                        "latitude": request.latitude,
-                        "longitude": request.longitude,
-                        "captured_at": now,
-                    },
-                    headers=headers,
-                )
-                
-                if response.status_code in [200, 204]:
-                    print(f"✓ Location updated: {location_id}")
-                    return {
-                        "success": True,
-                        "action": "updated",
-                        "location_id": location_id,
-                        "device_id": request.device_id,
-                        "latitude": request.latitude,
-                        "longitude": request.longitude,
-                        "captured_at": now,
-                    }
-                else:
-                    print(f"✗ Failed to update: {response.text}")
-                    raise HTTPException(status_code=500, detail=response.text)
-            else:
-                # Create new location
-                location_id = str(uuid.uuid4())
-                print(f"[UPDATE-CURRENT] Creating new location: {location_id}")
-                
-                location_record = {
+
+            if response.status_code in [200, 201]:
+                print(f"✓ Location upserted: {location_id}")
+                return {
+                    "success": True,
+                    "action": "upserted",
                     "location_id": location_id,
                     "device_id": request.device_id,
                     "latitude": request.latitude,
                     "longitude": request.longitude,
                     "captured_at": now,
                 }
-                
-                response = await client.post(
-                    f"{SUPABASE_BASE}/rest/v1/device_location",
-                    json=location_record,
-                    headers=headers,
-                )
-                
-                if response.status_code in [200, 201]:
-                    print(f"✓ Location created: {location_id}")
-                    return {
-                        "success": True,
-                        "action": "created",
-                        "location_id": location_id,
-                        "device_id": request.device_id,
-                        "latitude": request.latitude,
-                        "longitude": request.longitude,
-                        "captured_at": now,
-                    }
-                else:
-                    print(f"✗ Failed to create: {response.text}")
-                    raise HTTPException(status_code=500, detail=response.text)
+
+            print(f"✗ Failed to upsert: {response.text}")
+            raise HTTPException(status_code=500, detail=response.text)
     except HTTPException:
         raise
     except Exception as e:

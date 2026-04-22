@@ -526,10 +526,14 @@ class LocationTrackingService : Service() {
 
     private fun fetchOpenMeteoWeather(latitude: Double, longitude: Double): JSONObject? {
         return try {
+            // Also request hourly precipitation so we can use the current-hour value as a
+            // fallback. Open-Meteo's current.precipitation is "sum of the preceding hour",
+            // so it reads 0 whenever rain started within the current clock hour.
             val url = "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$latitude&longitude=$longitude" +
                 "&timezone=UTC&wind_speed_unit=kmh" +
                 "&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,pressure_msl,wind_speed_10m,wind_direction_10m" +
+                "&hourly=precipitation" +
                 "&forecast_days=1"
             val request = Request.Builder().url(url).build()
             val response = httpClient.newCall(request).execute()
@@ -539,6 +543,28 @@ class LocationTrackingService : Service() {
             val current = json.optJSONObject("current") ?: return null
             val elevation = json.optDouble("elevation")
             current.put("elevation", elevation)
+
+            // If the preceding-hour aggregate is 0, check the current hour's hourly
+            // forecast value which captures ongoing rain within the current hour.
+            val currentPrecip = current.optDouble("precipitation", 0.0)
+            if (currentPrecip == 0.0) {
+                val hourly = json.optJSONObject("hourly")
+                val times = hourly?.optJSONArray("time")
+                val precips = hourly?.optJSONArray("precipitation")
+                if (times != null && precips != null) {
+                    val currentTime = current.optString("time") // "2024-01-15T14:00"
+                    for (i in 0 until times.length()) {
+                        if (times.optString(i) == currentTime) {
+                            val hourlyPrecip = precips.optDouble(i, 0.0)
+                            if (hourlyPrecip > 0.0) {
+                                current.put("precipitation", hourlyPrecip)
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo fetch error: ${e.message}")

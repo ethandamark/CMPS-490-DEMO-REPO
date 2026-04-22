@@ -42,7 +42,7 @@ CREATE TABLE device (
 --------------------------------------------------
 CREATE TABLE device_location (
     location_id UUID PRIMARY KEY,
-    device_id UUID REFERENCES device(device_id),
+    device_id UUID UNIQUE REFERENCES device(device_id),
     latitude DECIMAL(9,6),
     longitude DECIMAL(9,6),
     captured_at TIMESTAMP
