@@ -25,7 +25,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Manages syncing of offline weather snapshots to the backend.
- * - Registers a WiFi NetworkCallback to trigger sync on WiFi connect.
+ * - Registers a NetworkCallback to trigger sync only on genuine reconnects
+ *   (lost → available). Registration while already connected does NOT trigger sync.
  * - Schedules periodic WorkManager sync.
  * - On sync: posts unsynced local snapshots to backend, marks them synced locally.
  */
@@ -37,7 +38,7 @@ object SnapshotSyncManager {
 
     fun init(context: Context) {
         schedulePeriodicSync(context)
-        registerWifiCallback(context)
+        registerReconnectCallback(context)
     }
 
     fun schedulePeriodicSync(context: Context) {
@@ -76,18 +77,32 @@ object SnapshotSyncManager {
         Log.d(TAG, "One-shot sync enqueued (deduplicated)")
     }
 
-    private fun registerWifiCallback(context: Context) {
+    private fun registerReconnectCallback(context: Context) {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
         cm.registerNetworkCallback(
             request,
             object : ConnectivityManager.NetworkCallback() {
+                // Only sync when we regain connectivity after a real loss.
+                // onAvailable fires immediately on registration if a matching
+                // network is already active — we must ignore that initial fire.
+                private var hadLoss = false
+
+                override fun onLost(network: Network) {
+                    hadLoss = true
+                    Log.d(TAG, "Network lost — will sync on reconnect")
+                }
+
                 override fun onAvailable(network: Network) {
-                    Log.d(TAG, "WiFi connected — triggering sync")
-                    triggerImmediateSync(context)
+                    if (hadLoss) {
+                        hadLoss = false
+                        Log.d(TAG, "Network reconnected — triggering snapshot sync")
+                        triggerImmediateSync(context)
+                    }
+                    // else: initial registration callback while already connected — skip
                 }
             },
         )

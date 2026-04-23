@@ -1,5 +1,5 @@
 {
-  "experiment_name": "r75_dbz45_w1_3",
+  "experiment_name": "v1.0.0",
   "feature_cols": [
     "temp_c",
     "pressure_hPa",

@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
@@ -27,16 +28,17 @@ import java.util.concurrent.TimeUnit
  * Manages syncing of locally-queued model instances to the backend.
  * Follows the same pattern as SnapshotSyncManager:
  * - Periodic 1h WorkManager sync
- * - WiFi NetworkCallback for immediate sync on reconnect
+ * - NetworkCallback for immediate sync only on genuine reconnects (lost → available)
  */
 object ModelInstanceSyncManager {
 
     private const val TAG = "ModelInstanceSync"
     const val SYNC_WORK_NAME = "model_instance_sync_periodic"
+    const val SYNC_IMMEDIATE_WORK_NAME = "model_instance_sync_immediate"
 
     fun init(context: Context) {
         schedulePeriodicSync(context)
-        registerWifiCallback(context)
+        registerReconnectCallback(context)
     }
 
     fun schedulePeriodicSync(context: Context) {
@@ -65,22 +67,42 @@ object ModelInstanceSyncManager {
             .setConstraints(constraints)
             .build()
 
-        WorkManager.getInstance(context).enqueue(request)
-        Log.d(TAG, "One-shot model-instance sync enqueued")
+        // KEEP ensures only one immediate sync runs at a time even if the
+        // callback fires multiple times in quick succession.
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            SYNC_IMMEDIATE_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+        Log.d(TAG, "One-shot model-instance sync enqueued (deduplicated)")
     }
 
-    private fun registerWifiCallback(context: Context) {
+    private fun registerReconnectCallback(context: Context) {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
         cm.registerNetworkCallback(
             request,
             object : ConnectivityManager.NetworkCallback() {
+                // Only sync when we regain connectivity after a real loss.
+                // onAvailable fires immediately on registration if already
+                // connected — we must ignore that initial fire.
+                private var hadLoss = false
+
+                override fun onLost(network: Network) {
+                    hadLoss = true
+                    Log.d(TAG, "Network lost — will sync model instances on reconnect")
+                }
+
                 override fun onAvailable(network: Network) {
-                    Log.d(TAG, "WiFi connected — triggering model-instance sync")
-                    triggerImmediateSync(context)
+                    if (hadLoss) {
+                        hadLoss = false
+                        Log.d(TAG, "Network reconnected — triggering model-instance sync")
+                        triggerImmediateSync(context)
+                    }
+                    // else: initial registration callback while already connected — skip
                 }
             },
         )
