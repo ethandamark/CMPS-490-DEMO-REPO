@@ -1,14 +1,11 @@
 package com.CMPS490.weathertracker.sync
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
@@ -27,16 +24,16 @@ import java.util.concurrent.TimeUnit
  * Manages syncing of locally-queued model instances to the backend.
  * Follows the same pattern as SnapshotSyncManager:
  * - Periodic 1h WorkManager sync
- * - WiFi NetworkCallback for immediate sync on reconnect
+ * - NetworkCallback for immediate sync only on genuine reconnects (lost → available)
  */
 object ModelInstanceSyncManager {
 
     private const val TAG = "ModelInstanceSync"
     const val SYNC_WORK_NAME = "model_instance_sync_periodic"
+    const val SYNC_IMMEDIATE_WORK_NAME = "model_instance_sync_immediate"
 
     fun init(context: Context) {
         schedulePeriodicSync(context)
-        registerWifiCallback(context)
     }
 
     fun schedulePeriodicSync(context: Context) {
@@ -65,26 +62,16 @@ object ModelInstanceSyncManager {
             .setConstraints(constraints)
             .build()
 
-        WorkManager.getInstance(context).enqueue(request)
-        Log.d(TAG, "One-shot model-instance sync enqueued")
-    }
-
-    private fun registerWifiCallback(context: Context) {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .build()
-
-        cm.registerNetworkCallback(
+        // KEEP ensures only one immediate sync runs at a time even if the
+        // callback fires multiple times in quick succession.
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            SYNC_IMMEDIATE_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
             request,
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    Log.d(TAG, "WiFi connected — triggering model-instance sync")
-                    triggerImmediateSync(context)
-                }
-            },
         )
+        Log.d(TAG, "One-shot model-instance sync enqueued (deduplicated)")
     }
+
 }
 
 /**
@@ -126,6 +113,7 @@ class ModelInstanceSyncWorker(
                 addProperty("result_type", item.resultType)
                 addProperty("confidence_score", item.confidenceScore.toDouble())
                 addProperty("created_at", item.createdAt)
+                item.weatherId?.let { addProperty("weather_id", it) }
             }
             instancesArray.add(obj)
         }

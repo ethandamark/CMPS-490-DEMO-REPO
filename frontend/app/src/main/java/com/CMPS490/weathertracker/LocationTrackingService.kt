@@ -55,6 +55,12 @@ class LocationTrackingService : Service() {
         private const val NOTIFICATION_ID = 1001
         const val MILLIS_PER_HOUR = 3_600_000L
         const val ACTION_FORCE_PREDICT = "com.CMPS490.weathertracker.FORCE_PREDICT"
+
+        private const val PREFS_NAME = "location_tracking_prefs"
+        private const val PREF_LAST_SNAPSHOT_TIME = "last_snapshot_time_ms"
+        private const val PREF_LAST_SNAPSHOT_LAT = "last_snapshot_lat"
+        private const val PREF_LAST_SNAPSHOT_LON = "last_snapshot_lon"
+        private const val PREF_HAS_SEEDED_HISTORY = "has_seeded_history"
         
         // Update interval: 1 minute (in milliseconds) - for testing
         private const val LOCATION_UPDATE_INTERVAL = 1 * 60 * 1000L
@@ -118,10 +124,10 @@ class LocationTrackingService : Service() {
     // Minimum distance change (in meters) to trigger a new weather snapshot (no prediction)
     private val MIN_SNAPSHOT_DISTANCE_METERS = 5000f
 
-    // Whether we've already seeded 24h of weather history into Room DB
+    // Whether we've already seeded 24h of weather history (persisted across restarts)
     private val hasSeededHistory = AtomicBoolean(false)
 
-    // Track when we last ran a weather snapshot + prediction
+    // Track when we last ran a weather snapshot + prediction (persisted across restarts)
     private var lastSnapshotTimeMs: Long = 0L
 
     private val httpClient by lazy {
@@ -134,6 +140,21 @@ class LocationTrackingService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
+
+        // Restore the last snapshot time so a service restart doesn't look like
+        // the hourly timer has elapsed and trigger an immediate prediction.
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        lastSnapshotTimeMs = prefs.getLong(PREF_LAST_SNAPSHOT_TIME, 0L)
+        val savedLat = prefs.getFloat(PREF_LAST_SNAPSHOT_LAT, Float.MIN_VALUE)
+        val savedLon = prefs.getFloat(PREF_LAST_SNAPSHOT_LON, Float.MIN_VALUE)
+        if (savedLat != Float.MIN_VALUE && savedLon != Float.MIN_VALUE) {
+            lastSnapshotLatitude = savedLat.toDouble()
+            lastSnapshotLongitude = savedLon.toDouble()
+        }
+        if (prefs.getBoolean(PREF_HAS_SEEDED_HISTORY, false)) {
+            hasSeededHistory.set(true)
+        }
+        Log.d(TAG, "Restored lastSnapshotTimeMs = $lastSnapshotTimeMs, lastSnapshotLat = $lastSnapshotLatitude, lastSnapshotLon = $lastSnapshotLongitude")
         
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         
@@ -171,6 +192,7 @@ class LocationTrackingService : Service() {
                         Log.d(TAG, "   ⏰ Hourly prediction timer — running weather snapshot + prediction")
                         lastSnapshotLatitude = location.latitude
                         lastSnapshotLongitude = location.longitude
+                        saveSnapshotLocation(location.latitude, location.longitude)
                         serviceScope.launch {
                             storeWeatherSnapshot(deviceId, location.latitude, location.longitude, runPrediction = true)
                         }
@@ -180,6 +202,7 @@ class LocationTrackingService : Service() {
                         updateLocationInBackend(location.latitude, location.longitude)
                         lastSnapshotLatitude = location.latitude
                         lastSnapshotLongitude = location.longitude
+                        saveSnapshotLocation(location.latitude, location.longitude)
                         serviceScope.launch {
                             storeWeatherSnapshot(deviceId, location.latitude, location.longitude, runPrediction = false)
                         }
@@ -314,9 +337,16 @@ class LocationTrackingService : Service() {
         }
     }
     
-    // Last location where we stored a weather snapshot (for 5km threshold)
+    // Last location where we stored a weather snapshot (for 5km threshold, persisted across restarts)
     private var lastSnapshotLatitude: Double? = null
     private var lastSnapshotLongitude: Double? = null
+
+    private fun saveSnapshotLocation(lat: Double, lon: Double) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putFloat(PREF_LAST_SNAPSHOT_LAT, lat.toFloat())
+            .putFloat(PREF_LAST_SNAPSHOT_LON, lon.toFloat())
+            .apply()
+    }
 
     private fun hasLocationChanged(newLat: Double, newLon: Double): Boolean {
         val prevLat = lastLatitude ?: return true  // No previous location, always update
@@ -366,6 +396,14 @@ class LocationTrackingService : Service() {
         try {
             val nowMs = System.currentTimeMillis()
             val hourMs = (nowMs / MILLIS_PER_HOUR) * MILLIS_PER_HOUR  // round to current hour
+
+            // Claim the snapshot slot eagerly so that any location callbacks that fire
+            // while this coroutine is awaiting network responses don't see hourElapsed=true
+            // and launch duplicate predictions.
+            lastSnapshotTimeMs = nowMs
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putLong(PREF_LAST_SNAPSHOT_TIME, lastSnapshotTimeMs)
+                .apply()
 
             val db = WeatherDatabase.getInstance(this)
 
@@ -447,18 +485,7 @@ class LocationTrackingService : Service() {
 
             db.weatherCacheDao().upsert(cacheEntity)
 
-            // Clear is_current flag and insert new snapshot
-            db.offlineWeatherSnapshotDao().clearCurrentFlag(deviceId)
             val snapshotId = deterministicSnapshotId(cacheId)
-            db.offlineWeatherSnapshotDao().upsertSnapshot(
-                OfflineWeatherSnapshotEntity(
-                    weatherId = snapshotId,
-                    deviceId = deviceId,
-                    cacheId = cacheId,
-                    syncedAt = null,
-                    isCurrent = true,
-                )
-            )
 
             // Prune observations older than 48 h
             val cutoff48h = nowMs - 48 * MILLIS_PER_HOUR
@@ -468,8 +495,24 @@ class LocationTrackingService : Service() {
             // Backfill any hours we missed while offline with actual observations
             backfillMissedObservations(deviceId, latitude, longitude, hourMs, db)
 
-            // Seed 24h of historical weather on first run so predictor has history
+            // Seed 24h of historical weather on first run so predictor has history.
+            // seedWeatherHistory() may upsert the current-hour snapshot with
+            // syncedAt = now (marking it as already-synced), so we write the
+            // current observation snapshot AFTER seeding to guarantee synced_at = null.
             seedWeatherHistory(deviceId, latitude, longitude, db)
+
+            // (Re-)insert the current observation snapshot after seed/backfill so it
+            // always has synced_at = null and is_current = true — eligible for sync.
+            db.offlineWeatherSnapshotDao().clearCurrentFlag(deviceId)
+            db.offlineWeatherSnapshotDao().upsertSnapshot(
+                OfflineWeatherSnapshotEntity(
+                    weatherId = snapshotId,
+                    deviceId = deviceId,
+                    cacheId = cacheId,
+                    syncedAt = null,
+                    isCurrent = true,
+                )
+            )
 
             // Run on-device prediction only when requested (hourly timer)
             if (runPrediction) {
@@ -508,6 +551,7 @@ class LocationTrackingService : Service() {
                             resultType = resultType,
                             confidenceScore = result.stormProbability,
                             createdAt = nowMs,
+                            weatherId = snapshotId,
                         )
                     )
                     // Prune synced model instances older than 48h
@@ -516,9 +560,6 @@ class LocationTrackingService : Service() {
             } else {
                 Log.d(TAG, "📦 Snapshot stored (prediction skipped)")
             }
-
-            // Mark snapshot time so hourly timer knows when we last ran
-            lastSnapshotTimeMs = System.currentTimeMillis()
         } catch (e: Exception) {
             Log.e(TAG, "Error storing weather snapshot", e)
         }
@@ -797,7 +838,9 @@ class LocationTrackingService : Service() {
                         weatherId = deterministicSnapshotId(cacheId),
                         deviceId = deviceId,
                         cacheId = cacheId,
-                        syncedAt = null,
+                        // Mark as already synced — this data came FROM the backend,
+                        // so SnapshotSyncWorker must not send it back again.
+                        syncedAt = System.currentTimeMillis(),
                         isCurrent = false,
                     )
                 )
@@ -810,10 +853,15 @@ class LocationTrackingService : Service() {
                 val fcCount = entities.count { it.isForecast }
                 Log.d(TAG, "🌱 Seeded $obsCount observations + $fcCount forecasts into Room DB")
             }
+            // Persist the seeded flag so service restarts don't re-seed
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putBoolean(PREF_HAS_SEEDED_HISTORY, true)
+                .apply()
         } catch (e: Exception) {
             Log.e(TAG, "🌱 Weather history seed error", e)
-            // Reset flag so seed can be retried
-            hasSeededHistory.set(false)
+            // Leave hasSeededHistory=true so a concurrent storeWeatherSnapshot coroutine
+            // doesn't enter seed again and create a duplicate.  The next hourly run will
+            // re-seed automatically if Room still has < 12 rows (existing.size check above).
         }
     }
 

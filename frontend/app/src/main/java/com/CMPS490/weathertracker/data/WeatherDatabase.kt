@@ -12,7 +12,7 @@ import androidx.room.RoomDatabase
         HourlyPredictionEntity::class,
         ModelInstanceEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class WeatherDatabase : RoomDatabase() {

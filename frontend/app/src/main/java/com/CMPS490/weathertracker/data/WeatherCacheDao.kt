@@ -28,6 +28,8 @@ interface WeatherCacheDao {
         "WHERE is_forecast = 0 " +
         "AND latitude BETWEEN :latMin AND :latMax " +
         "AND longitude BETWEEN :lonMin AND :lonMax " +
+        "AND recorded_at >= :minTime " +
+        "AND recorded_at <= :maxTime " +
         "ORDER BY recorded_at DESC LIMIT :limit"
     )
     suspend fun getObservationsNear(
@@ -35,7 +37,26 @@ interface WeatherCacheDao {
         latMax: Double,
         lonMin: Double,
         lonMax: Double,
+        minTime: Long = 0L,
+        maxTime: Long = Long.MAX_VALUE,
         limit: Int = 48,
+    ): List<WeatherCacheEntity>
+
+    /** All real observations strictly after [fromTime] — no row limit, sorted ascending. */
+    @Query(
+        "SELECT * FROM weather_cache " +
+        "WHERE is_forecast = 0 " +
+        "AND latitude BETWEEN :latMin AND :latMax " +
+        "AND longitude BETWEEN :lonMin AND :lonMax " +
+        "AND recorded_at > :fromTime " +
+        "ORDER BY recorded_at ASC"
+    )
+    suspend fun getObservationsAfter(
+        latMin: Double,
+        latMax: Double,
+        lonMin: Double,
+        lonMax: Double,
+        fromTime: Long,
     ): List<WeatherCacheEntity>
 
     @Query(

@@ -23,8 +23,25 @@ import uuid
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import logging
 from math import radians, cos, sin, sqrt, atan2
+
+_CENTRAL = ZoneInfo("America/Chicago")
+
+
+def _to_central(ts) -> str:
+    """Convert epoch-ms int/float or a UTC ISO string to a Central time string (CDT/CST)."""
+    if isinstance(ts, (int, float)):
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    else:
+        s = str(ts).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    central_dt = dt.astimezone(_CENTRAL)
+    tz_abbr = "CDT" if central_dt.dst() and central_dt.dst().total_seconds() > 0 else "CST"
+    return central_dt.strftime(f"%Y-%m-%d %H:%M:%S {tz_abbr}")
 
 # Load environment variables
 load_dotenv()
@@ -784,19 +801,24 @@ from typing import Optional as _Optional
 import json as _json
 
 
-class SyncSnapshotsRequest(_BaseModel):
-    """Device sends weather_data (list of cache rows) bundled into one snapshot."""
+class SnapshotItem(_BaseModel):
+    weather_id: str
     weather_data: list[dict]
     snapshot_type: str = "sync"
+
+
+class SyncSnapshotsRequest(_BaseModel):
+    """Device sends one object per local snapshot, each with its own weather_id."""
+    snapshots: list[SnapshotItem]
 
 
 @app.post("/devices/{device_id}/sync-snapshots")
 async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
     """
-    Create ONE snapshot row in Supabase with the device's weather_data
-    archived as JSONB.  No individual weather_cache rows are written.
+    Insert one offline_weather_snapshot row per snapshot item sent by the device.
+    Each item carries its own weather_id so model_instance FK references are preserved.
     """
-    if not request.weather_data:
+    if not request.snapshots:
         return {"success": True, "upserted": 0}
 
     try:
@@ -808,20 +830,29 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
             }
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            snapshot_id = str(uuid.uuid4())
 
-            snap_row = {
-                "weather_id": snapshot_id,
-                "device_id": device_id,
-                "synced_at": now_iso,
-                "is_current": True,
-                "weather_data": request.weather_data,
-                "snapshot_type": request.snapshot_type,
-            }
+            snap_rows = []
+            for item in request.snapshots:
+                # Convert recorded_at to a human-readable Central time string
+                converted_rows = []
+                for row in item.weather_data:
+                    r = dict(row)
+                    if "recorded_at" in r:
+                        r["recorded_at"] = _to_central(r["recorded_at"])
+                    converted_rows.append(r)
+
+                snap_rows.append({
+                    "weather_id": item.weather_id,
+                    "device_id": device_id,
+                    "synced_at": now_iso,
+                    "is_current": True,
+                    "weather_data": converted_rows,
+                    "snapshot_type": item.snapshot_type,
+                })
 
             resp = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
-                json=[snap_row],
+                json=snap_rows,
                 headers=headers,
             )
             if resp.status_code not in [200, 201]:
@@ -831,12 +862,12 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
                     detail=f"snapshot insert failed: {resp.status_code} — {resp.text[:300]}",
                 )
 
-            logger.info("Synced snapshot %s (%d weather rows) for device %s",
-                        snapshot_id, len(request.weather_data), device_id)
+            total_rows = sum(len(item.weather_data) for item in request.snapshots)
+            logger.info("Synced %d snapshots (%d weather rows) for device %s",
+                        len(request.snapshots), total_rows, device_id)
             return {
                 "success": True,
-                "upserted": len(request.weather_data),
-                "snapshot_id": snapshot_id,
+                "upserted": len(request.snapshots),
             }
     except HTTPException:
         raise
@@ -998,7 +1029,7 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                     "wind_direction": _safe(wind_dirs, i),
                     "precipitation_amount": _safe(precips, i),
                     "pressure": _safe(pressures, i),
-                    "recorded_at": time_str,
+                    "recorded_at": _to_central(time_str),
                     "latitude": latitude,
                     "longitude": longitude,
                     "is_forecast": False,
@@ -1030,7 +1061,7 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                     "wind_direction": _safe(fc_wind_dirs, i),
                     "precipitation_amount": _safe(fc_precips, i),
                     "pressure": _safe(fc_pressures, i),
-                    "recorded_at": time_str,
+                    "recorded_at": _to_central(time_str),
                     "latitude": latitude,
                     "longitude": longitude,
                     "is_forecast": True,
@@ -1041,6 +1072,20 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                 weather_rows.append(row)
 
             print(f"[SEED] Total rows (obs + forecast): {len(weather_rows)}")
+
+            # Deduplicate: drop any forecast row whose timestamp is already covered by an
+            # obs row.  The obs fetch (past_hours=24) ends at the last complete hour and
+            # does NOT include the current in-progress hour; the forecast fetch starts at
+            # the current hour.  This overlap causes the current hour to appear twice —
+            # once as is_forecast=False (if past_hours includes it) and once as True.
+            # Even when there is no overlap, filtering by timestamp ensures the current
+            # hour always comes from the obs section if available.
+            obs_timestamps = {r["recorded_at_ms"] for r in weather_rows if not r["is_forecast"]}
+            weather_rows = [
+                r for r in weather_rows
+                if not r["is_forecast"] or r["recorded_at_ms"] not in obs_timestamps
+            ]
+            print(f"[SEED] After dedup: {len(weather_rows)} rows")
 
             # ── Create ONE snapshot with all weather rows as JSONB archive ──
             if weather_rows:
@@ -1102,6 +1147,7 @@ class ModelInstanceBatchItem(BaseModel):
     result_type: str = "storm"
     confidence_score: float
     created_at: int  # epoch-ms from the device
+    weather_id: str | None = None  # set by device at prediction time; None = fall back to lookup
 
 
 class ModelInstanceBatchRequest(BaseModel):
@@ -1187,7 +1233,7 @@ async def sync_model_instances(device_id: str, request: ModelInstanceBatchReques
             created_at = datetime.fromtimestamp(
                 item.created_at / 1000.0, tz=timezone.utc
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
-            records.append({
+            rec = {
                 "instance_id": item.instance_id,
                 "version": item.version,
                 "latitude": item.latitude,
@@ -1196,7 +1242,11 @@ async def sync_model_instances(device_id: str, request: ModelInstanceBatchReques
                 "result_type": item.result_type,
                 "confidence_score": round(item.confidence_score, 4),
                 "created_at": created_at,
-            })
+            }
+            # Use the weather_id the device captured at prediction time when available
+            if item.weather_id:
+                rec["weather_id"] = item.weather_id
+            records.append(rec)
 
         async with httpx.AsyncClient(timeout=30) as client:
             headers = {
@@ -1205,19 +1255,47 @@ async def sync_model_instances(device_id: str, request: ModelInstanceBatchReques
                 "Prefer": "return=representation,resolution=merge-duplicates",
             }
 
-            # Look up the most recent snapshot for this device to link all instances
-            snap_resp = await client.get(
-                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
-                f"?device_id=eq.{device_id}&order=synced_at.desc,weather_id.desc&limit=1"
-                f"&select=weather_id",
-                headers={"apikey": SUPABASE_API_KEY},
-            )
-            if snap_resp.status_code == 200:
-                rows = snap_resp.json()
-                if rows:
-                    snap_id = rows[0]["weather_id"]
-                    for rec in records:
-                        rec["weather_id"] = snap_id
+            # Collect every weather_id that records claim to reference
+            claimed_ids = {rec["weather_id"] for rec in records if rec.get("weather_id")}
+
+            # Verify which of those actually exist in Supabase already.
+            # Any that don't exist yet (snapshot sync not yet committed) get nulled out
+            # to avoid a FK violation — the link is informational, not worth failing over.
+            if claimed_ids:
+                id_filter = ",".join(claimed_ids)
+                verify_resp = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
+                    f"?weather_id=in.({id_filter})&select=weather_id",
+                    headers={"apikey": SUPABASE_API_KEY},
+                )
+                if verify_resp.status_code == 200:
+                    existing_ids = {row["weather_id"] for row in verify_resp.json()}
+                else:
+                    existing_ids = set()
+
+                for rec in records:
+                    if rec.get("weather_id") and rec["weather_id"] not in existing_ids:
+                        logger.warning(
+                            "weather_id %s not yet in DB for instance %s — clearing FK to avoid violation",
+                            rec["weather_id"], rec["instance_id"]
+                        )
+                        del rec["weather_id"]
+
+            # Fall back to the most recent snapshot only for items that don't carry one
+            needs_lookup = [rec for rec in records if "weather_id" not in rec]
+            if needs_lookup:
+                snap_resp = await client.get(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot"
+                    f"?device_id=eq.{device_id}&order=synced_at.desc,weather_id.desc&limit=1"
+                    f"&select=weather_id",
+                    headers={"apikey": SUPABASE_API_KEY},
+                )
+                if snap_resp.status_code == 200:
+                    rows = snap_resp.json()
+                    if rows:
+                        fallback_snap_id = rows[0]["weather_id"]
+                        for rec in needs_lookup:
+                            rec["weather_id"] = fallback_snap_id
 
             resp = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/model_instance",
