@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WeatherTracker Architecture Poster (Pseudo-Linear Print Ready)</title>
+  <style>
+    :root {
+      --ink: #0e2a42;
+      --muted: #34546f;
+      --line: #2d5f90;
+      --paper: #f4f9fe;
+      --panel: #ffffff;
+      --panel-border: #9cbfe0;
+      --panel-shadow: 0 9px 20px rgba(34, 74, 110, 0.12);
+      --accent-user: #1f4d7a;
+      --accent-app: #0f6d72;
+      --accent-backend: #8a5b16;
+      --accent-data: #4f469a;
+    }
+
+    * { box-sizing: border-box; }
+
+    @page {
+      size: A3 landscape;
+      margin: 0.28in;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "Segoe UI", "Trebuchet MS", "Verdana", sans-serif;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    .poster {
+      width: 100%;
+      min-height: calc(100vh - 2px);
+      margin: 0;
+      padding: 18px 20px 14px;
+      background:
+        radial-gradient(circle at 89% 8%, rgba(92, 145, 194, 0.1) 0, rgba(92, 145, 194, 0) 33%),
+        radial-gradient(circle at 12% 80%, rgba(35, 132, 120, 0.1) 0, rgba(35, 132, 120, 0) 33%),
+        linear-gradient(180deg, #f9fcff 0%, #f2f8fe 100%);
+      border: 2px solid #d4e3f2;
+      border-radius: 18px;
+      overflow: hidden;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 36px;
+      line-height: 1.08;
+      letter-spacing: 0.2px;
+      color: #0f3758;
+      font-weight: 800;
+    }
+
+    .subtitle {
+      margin: 7px 0 10px;
+      font-size: 16px;
+      line-height: 1.35;
+      color: var(--muted);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .chip {
+      border: 2px solid #c7dcef;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #284b67;
+      background: #ffffffcc;
+      white-space: nowrap;
+    }
+
+    .spine {
+      border: 2px solid #cfe0f0;
+      border-radius: 14px;
+      background: #ffffffe0;
+      padding: 10px 11px;
+      margin: 2px 0 10px;
+    }
+
+    .spine-title {
+      margin: 0 0 8px;
+      font-size: 16px;
+      color: #17486b;
+      line-height: 1.2;
+      font-weight: 800;
+    }
+
+    .pipeline {
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      gap: 0;
+      margin: 0;
+    }
+
+    .stage {
+      width: 14.7%;
+      min-width: 0;
+      background: var(--panel);
+      border: 2px solid var(--panel-border);
+      border-radius: 14px;
+      box-shadow: var(--panel-shadow);
+      padding: 10px 10px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      position: relative;
+    }
+
+    .stage .kicker {
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      font-weight: 800;
+      color: #ffffff;
+      border-radius: 8px;
+      padding: 5px 7px;
+      line-height: 1;
+      width: fit-content;
+    }
+
+    .user .kicker { background: var(--accent-user); }
+    .app .kicker { background: var(--accent-app); }
+    .backend .kicker { background: var(--accent-backend); }
+    .data .kicker { background: var(--accent-data); }
+
+    .stage h3 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.18;
+      color: #113a5a;
+    }
+
+    .stage ul {
+      margin: 0;
+      padding-left: 16px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .stage li {
+      margin: 0;
+      font-size: 12.8px;
+      line-height: 1.28;
+      color: #294760;
+    }
+
+    .arrow {
+      width: 2.4%;
+      min-width: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .arrow::before {
+      content: "";
+      width: 76%;
+      border-top: 4px solid var(--line);
+      opacity: 0.9;
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .arrow::after {
+      content: "";
+      border-left: 12px solid var(--line);
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      position: absolute;
+      right: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .cohesive-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 1.05fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .branch-lanes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 9px;
+    }
+
+    .lane {
+      border: 2px dashed #bfd7ec;
+      border-radius: 11px;
+      padding: 7px;
+      background: #f7fbff;
+      min-height: 108px;
+      position: relative;
+    }
+
+    .lane::before {
+      content: "";
+      position: absolute;
+      top: -12px;
+      left: 50%;
+      transform: translateX(-50%);
+      height: 12px;
+      border-left: 3px solid #7ca6cb;
+      opacity: 0.9;
+    }
+
+    .lane h5 {
+      margin: 0 0 5px;
+      font-size: 13.2px;
+      line-height: 1.15;
+      color: #123d5f;
+    }
+
+    .lane ul {
+      margin: 0;
+      padding-left: 15px;
+      display: grid;
+      gap: 2px;
+    }
+
+    .lane li {
+      margin: 0;
+      font-size: 11.9px;
+      line-height: 1.2;
+      color: #294760;
+    }
+
+    .panel {
+      border: 2px solid #cfe0f0;
+      border-radius: 14px;
+      background: #ffffffe0;
+      padding: 10px 11px;
+    }
+
+    .panel h4 {
+      margin: 0 0 7px;
+      font-size: 16px;
+      color: #17486b;
+      line-height: 1.2;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .mini {
+      border: 2px solid #c7dbed;
+      border-radius: 10px;
+      background: #f7fbff;
+      padding: 8px;
+      min-height: 88px;
+    }
+
+    .mini strong {
+      display: block;
+      margin: 0 0 3px;
+      font-size: 13px;
+      color: #123d5f;
+      line-height: 1.15;
+    }
+
+    .mini p,
+    .mini li {
+      margin: 0;
+      font-size: 12.2px;
+      line-height: 1.25;
+      color: #284660;
+    }
+
+    .mini ul {
+      margin: 0;
+      padding-left: 15px;
+      display: grid;
+      gap: 2px;
+    }
+
+    .footer {
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 11.7px;
+      line-height: 1.2;
+      color: #4b6880;
+      border-top: 1px solid #d2e3f3;
+      padding-top: 7px;
+    }
+
+    @media print {
+      .poster {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="poster">
+    <h1 class="title">WeatherTracker Professional Workflow Diagram</h1>
+    <p class="subtitle">One-page pseudo-linear map: a primary execution spine with accurate branch paths for fallback, sync, and external API sourcing.</p>
+
+    <section class="legend">
+      <span class="chip">Consumer-first pseudo-linear flow</span>
+      <span class="chip">Single-page print-safe A3 landscape</span>
+      <span class="chip">Primary spine + branch lanes</span>
+      <span class="chip">Android + FastAPI + Supabase architecture</span>
+    </section>
+
+    <section class="spine" aria-label="Pseudo-linear workflow with branches">
+      <h2 class="spine-title">Primary Execution Spine</h2>
+      <div class="pipeline">
+        <article class="stage user">
+          <span class="kicker">Step 1</span>
+          <h3>Consumer</h3>
+          <ul>
+            <li>Opens app and chooses live or preset location.</li>
+            <li>Confirms location and notification permissions.</li>
+            <li>Consumes weather, radar, and alert outputs.</li>
+          </ul>
+        </article>
+
+        <div class="arrow" aria-hidden="true"></div>
+
+        <article class="stage app">
+          <span class="kicker">Step 2</span>
+          <h3>Android App Core</h3>
+          <ul>
+            <li>MainActivity drives UI state and navigation.</li>
+            <li>AuthenticationService restores/registers identity.</li>
+            <li>Cache and location updates keep UX responsive.</li>
+          </ul>
+        </article>
+
+        <div class="arrow" aria-hidden="true"></div>
+
+        <article class="stage backend">
+          <span class="kicker">Step 3</span>
+          <h3>FastAPI Orchestration</h3>
+          <ul>
+            <li>Handles register, weather proxy, location, and sync endpoints.</li>
+            <li>Normalizes errors and keeps response contracts stable.</li>
+            <li>Coordinates writes to Supabase PostgREST.</li>
+          </ul>
+        </article>
+
+        <div class="arrow" aria-hidden="true"></div>
+
+        <article class="stage app">
+          <span class="kicker">Step 4</span>
+          <h3>On-Device Prediction</h3>
+          <ul>
+            <li>Room stores weather snapshots and history.</li>
+            <li>FeatureAssemblyService builds ML feature set.</li>
+            <li>ONNX inference emits probability and alert state.</li>
+          </ul>
+        </article>
+
+        <div class="arrow" aria-hidden="true"></div>
+
+        <article class="stage backend">
+          <span class="kicker">Step 5</span>
+          <h3>Cloud Persistence</h3>
+          <ul>
+            <li>Workers sync snapshots and model instances.</li>
+            <li>Supabase persists users, device state, locations, and outputs.</li>
+            <li>Heartbeat refreshes last_active_at and account status.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="branch-lanes">
+        <article class="lane">
+          <h5>Branch A: API Sourcing</h5>
+          <ul>
+            <li>NWS supplies points, forecast, and active alerts.</li>
+            <li>RainViewer supplies radar frame metadata and tiles.</li>
+            <li>Open-Meteo supplies observations and forecast context.</li>
+          </ul>
+        </article>
+        <article class="lane">
+          <h5>Branch B: Fallback Path</h5>
+          <ul>
+            <li>If backend is down, app switches to Open-Meteo direct mode.</li>
+            <li>Health check runs every 10 seconds.</li>
+            <li>Flow returns to primary spine when backend recovers.</li>
+          </ul>
+        </article>
+        <article class="lane">
+          <h5>Branch C: Deferred Sync Path</h5>
+          <ul>
+            <li>WorkManager runs hourly and on Wi-Fi reconnect.</li>
+            <li>Snapshot and model_instance payloads are batched.</li>
+            <li>Retries preserve data consistency under intermittent network.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="cohesive-grid">
+      <article class="panel">
+        <h4>Execution Path Summary (Pseudo-Linear)</h4>
+        <div class="row">
+          <div class="mini">
+            <strong>Main Spine</strong>
+            <ul>
+              <li>User opens app and permissions are evaluated.</li>
+              <li>Backend orchestration serves weather and state updates.</li>
+              <li>Forecast, alerts, and radar are rendered to the user.</li>
+            </ul>
+          </div>
+          <div class="mini">
+            <strong>ML Branch</strong>
+            <ul>
+              <li>LocationTrackingService captures hourly observations.</li>
+              <li>Features are assembled from Room history.</li>
+              <li>ONNX result drives local severe-weather notification.</li>
+            </ul>
+          </div>
+          <div class="mini">
+            <strong>Cloud Branch</strong>
+            <ul>
+              <li>Device/location updates persist through backend.</li>
+              <li>SnapshotSync + ModelInstanceSync push local data.</li>
+              <li>Supabase keeps cloud state aligned with device state.</li>
+            </ul>
+          </div>
+          <div class="mini">
+            <strong>Recovery Branch</strong>
+            <ul>
+              <li>If backend is unavailable, UI uses Open-Meteo directly.</li>
+              <li>Backend health is checked every 10 seconds.</li>
+              <li>Flow auto-returns to primary path when healthy.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <h4>API Sourcing and Cohesive Dependency View</h4>
+        <div class="row">
+          <div class="mini">
+            <strong>NWS (weather.gov)</strong>
+            <p>Supplies point metadata, daily/hourly forecasts, and active weather alerts via backend endpoints.</p>
+          </div>
+          <div class="mini">
+            <strong>Open-Meteo</strong>
+            <p>Feeds observation capture, 24-hour seeding, forecast prefetch, and full UI fallback mode.</p>
+          </div>
+          <div class="mini">
+            <strong>RainViewer</strong>
+            <p>Provides radar frame timing and tile templates used by map overlay playback.</p>
+          </div>
+          <div class="mini">
+            <strong>Supabase PostgREST</strong>
+            <p>Stores anonymous users, devices, locations, snapshots, and model_instance prediction records.</p>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <span>Print profile: A3 Landscape with protected margins to prevent right-edge clipping</span>
+      <span>Diagram style: Pseudo-linear professional workflow with consumer actor and connected branch lanes</span>
+    </footer>
+  </main>
+</body>
+</html>
