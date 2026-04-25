@@ -39,7 +39,7 @@ interface WeatherCacheDao {
         lonMax: Double,
         minTime: Long = 0L,
         maxTime: Long = Long.MAX_VALUE,
-        limit: Int = 48,
+        limit: Int = 24,
     ): List<WeatherCacheEntity>
 
     /** All real observations strictly after [fromTime] — no row limit, sorted ascending. */

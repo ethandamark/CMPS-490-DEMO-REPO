@@ -60,7 +60,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
             latMax = latitude + delta,
             lonMin = longitude - delta,
             lonMax = longitude + delta,
-            limit = 48,
+            limit = 24,
         )
 
         val history: List<WeatherCacheEntity>
@@ -72,7 +72,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
             dataSource = "observations"
         } else {
             // Offline / insufficient observations — supplement with forecasts.
-            // Pull forecasts covering the past 48 h through the next hour so we have
+            // Pull forecasts covering the past 24 h through the next hour so we have
             // a coherent timeline: past observations + the nearest forecast at or
             // just after "now" acts as the current data point.
             val nowMs = System.currentTimeMillis()
@@ -82,7 +82,7 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
                 latMax = latitude + delta,
                 lonMin = longitude - delta,
                 lonMax = longitude + delta,
-                fromTime = nowMs - 48 * 3_600_000L,
+                fromTime = nowMs - 24 * 3_600_000L,
             )
             // Merge: observations first, then forecasts, deduplicate by recordedAt.
             // Only include forecasts up to the current hour so the model doesn't

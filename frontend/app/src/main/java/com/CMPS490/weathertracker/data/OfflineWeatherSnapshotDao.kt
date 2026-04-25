@@ -22,7 +22,7 @@ interface OfflineWeatherSnapshotDao {
         "ORDER BY (SELECT recorded_at FROM weather_cache WHERE weather_cache.cache_id = offline_weather_snapshot.cache_id) DESC " +
         "LIMIT :limit"
     )
-    suspend fun getSnapshotsForDevice(deviceId: String, limit: Int = 48): List<SnapshotWithCache>
+    suspend fun getSnapshotsForDevice(deviceId: String, limit: Int = 24): List<SnapshotWithCache>
 
     @Transaction
     @Query(

@@ -429,7 +429,7 @@ class LocationTrackingService : Service() {
                                 modelVersion = result.modelVersion,
                             )
                         )
-                        db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
+                        db.hourlyPredictionDao().pruneOlderThan(nowMs - 24 * MILLIS_PER_HOUR)
 
                         if (result.alertState == 1) {
                             fireStormNotification(result.stormProbability)
@@ -449,7 +449,7 @@ class LocationTrackingService : Service() {
                                 createdAt = nowMs,
                             )
                         )
-                        db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
+                        db.modelInstanceDao().pruneOld(nowMs - 24 * MILLIS_PER_HOUR)
                     } else {
                         Log.w(TAG, "No cached/forecast data available for offline prediction")
                     }
@@ -487,10 +487,10 @@ class LocationTrackingService : Service() {
 
             val snapshotId = deterministicSnapshotId(cacheId)
 
-            // Prune observations older than 48 h
-            val cutoff48h = nowMs - 48 * MILLIS_PER_HOUR
-            db.weatherCacheDao().pruneOlderThan(cutoff48h)
-            db.offlineWeatherSnapshotDao().pruneOld(deviceId, cutoff48h)
+            // Prune observations older than 24 h
+            val cutoff24h = nowMs - 24 * MILLIS_PER_HOUR
+            db.weatherCacheDao().pruneOlderThan(cutoff24h)
+            db.offlineWeatherSnapshotDao().pruneOld(deviceId, cutoff24h)
 
             // Backfill any hours we missed while offline with actual observations
             backfillMissedObservations(deviceId, latitude, longitude, hourMs, db)
@@ -532,7 +532,7 @@ class LocationTrackingService : Service() {
                             modelVersion = result.modelVersion,
                         )
                     )
-                    db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
+                    db.hourlyPredictionDao().pruneOlderThan(nowMs - 24 * MILLIS_PER_HOUR)
 
                     if (result.alertState == 1) {
                         fireStormNotification(result.stormProbability)
@@ -554,8 +554,8 @@ class LocationTrackingService : Service() {
                             weatherId = snapshotId,
                         )
                     )
-                    // Prune synced model instances older than 48h
-                    db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
+                    // Prune synced model instances older than 24h
+                    db.modelInstanceDao().pruneOld(nowMs - 24 * MILLIS_PER_HOUR)
                 }
             } else {
                 Log.d(TAG, "📦 Snapshot stored (prediction skipped)")
@@ -616,7 +616,7 @@ class LocationTrackingService : Service() {
     /**
      * When back online, check for gaps in observation data (hours missed while offline)
      * and backfill them with actual weather from Open-Meteo, replacing forecast-only rows.
-     * Only backfills gaps > 1 hour, up to 48 hours.
+     * Only backfills gaps > 1 hour, up to 24 hours.
      */
     private suspend fun backfillMissedObservations(
         deviceId: String,
@@ -632,7 +632,7 @@ class LocationTrackingService : Service() {
                 latMax = latitude + delta,
                 lonMin = longitude - delta,
                 lonMax = longitude + delta,
-                limit = 48,
+                limit = 24,
             )
             if (observations.isEmpty()) return
 
@@ -645,7 +645,7 @@ class LocationTrackingService : Service() {
             val gapHours = ((currentHourMs - previousObs.recordedAt) / MILLIS_PER_HOUR).toInt()
             if (gapHours <= 1) return  // no gap to fill
 
-            val hoursToFetch = gapHours.coerceAtMost(48)
+            val hoursToFetch = gapHours.coerceAtMost(24)
             Log.d(TAG, "🔄 Detected ${gapHours}h observation gap — backfilling $hoursToFetch hours from Open-Meteo")
 
             // Fetch hourly historical data from Open-Meteo for the gap period

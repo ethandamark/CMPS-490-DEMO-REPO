@@ -194,7 +194,7 @@ class SnapshotSyncWorker(
 
         // Build one snapshot object per unsynced item.
         // Each snapshot's weather_data contains the full window of cache rows that
-        // were in Room at prediction time: up to 48 h of observations + 7-day forecast.
+        // were in Room at prediction time: up to 24 h of observations + 7-day forecast.
         // This mirrors what the seed endpoint stores so the backend gets a complete picture.
         val snapshotsArray = JsonArray()
         val DELTA = 0.045  // ~5 km bounding box (matches seedWeatherHistory)
@@ -206,7 +206,7 @@ class SnapshotSyncWorker(
             val MILLIS_PER_HOUR = 3_600_000L
 
             // 24-hour observation window ending at the prediction hour.
-            // Using a time-bounded window (not just LIMIT 48) means the start
+            // Using a time-bounded window (not just LIMIT 24) means the start
             // of the obs section advances by 1 h with each hourly snapshot.
             val obsRows = db.weatherCacheDao().getObservationsNear(
                 latMin = lat - DELTA,
@@ -215,7 +215,7 @@ class SnapshotSyncWorker(
                 lonMax = lon + DELTA,
                 minTime = snapshotTimeMs - 24 * MILLIS_PER_HOUR,
                 maxTime = snapshotTimeMs,
-                limit = 48,
+                limit = 24,
             ).sortedBy { it.recordedAt }
 
             // Real observations that arrived AFTER the prediction hour (i.e., the

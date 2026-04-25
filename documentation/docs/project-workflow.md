@@ -244,14 +244,14 @@ storeWeatherSnapshot(runPrediction=true)
   │    ├─ WeatherCacheEntity (cache_id = UUID v5 from lat/lon/time)
   │    └─ OfflineWeatherSnapshotEntity (is_current=true)
   │
-  ├─ [3] Prune old data (>48 hours) from Room cache
-  │         Note: the Room cache retains 48h of raw rows, but only the most
-  │         recent 24h window is used when building sync payloads (SnapshotSyncWorker)
+  ├─ [3] Prune old data (>24 hours) from Room cache
+         Note: the Room cache retains 24h of raw rows, and that same 24h window
+         is used when building sync payloads (SnapshotSyncWorker)
   │         and when querying observations for feature assembly.
   │
   ├─ [4] Backfill missed hours (if gaps > 1h detected):
   │    GET api.open-meteo.com/v1/forecast?start_date={start}&end_date={end}&hourly=...
-  │    → Insert missing WeatherCacheEntity rows (capped at 48h)
+    → Insert missing WeatherCacheEntity rows (capped at 24h)
   │
   ├─ [5] Seed 24h history (first run only):
   │    POST /devices/{device_id}/seed-weather-history
@@ -486,7 +486,7 @@ Same pipeline as DebugPredictActivity but via BroadcastReceiver (uses `goAsync()
 |-------|---------|-------------------|
 | `anonymous_user` | One per app install; tracks status and activity | Root entity |
 | `device` | One per user; stores platform, permissions, notification flags | FK → anonymous_user |
-| `device_location` | GPS coordinates with timestamps | FK → device |
+| `device_location` | Current GPS coordinates — one row per device (unique constraint on `device_id`) | FK → device |
 | `offline_weather_snapshot` | Bundled weather data (JSONB) synced from device | FK → device |
 | `model_instance` | Individual ML prediction results | FK → offline_weather_snapshot |
 
@@ -495,7 +495,7 @@ Same pipeline as DebugPredictActivity but via BroadcastReceiver (uses `goAsync()
 ```
 anonymous_user (1) ──── (1) device
                               │
-                    (1) ──── (N) device_location
+                    (1) ──── (1) device_location   ← unique constraint on device_id
                               │
                     (1) ──── (N) offline_weather_snapshot
                                           │
@@ -510,6 +510,8 @@ anonymous_user (1) ──── (1) device
 | OfflineWeatherSnapshotEntity | offline_weather_snapshot | Device → Cloud |
 | HourlyPredictionEntity | *(local only — storm risk timeline)* | Not synced |
 | ModelInstanceEntity | model_instance | Device → Cloud |
+
+> **`WeatherCacheEntity` schema note:** The Room table includes a `mrms_max_dbz_75km` column (serialized as `mrms_max_dbz_75km` in the weather_data JSONB payload). It is always `null` in the current release and is **not** part of the 33-feature ML input vector — it is reserved for a future MRMS radar reflectivity integration.
 
 ---
 
