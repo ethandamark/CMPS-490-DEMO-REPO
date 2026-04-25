@@ -27,7 +27,8 @@ interface OfflineWeatherSnapshotDao {
     @Transaction
     @Query(
         "SELECT * FROM offline_weather_snapshot " +
-        "WHERE device_id = :deviceId AND synced_at IS NULL"
+        "WHERE device_id = :deviceId AND synced_at IS NULL " +
+        "AND weather_id IN (SELECT weather_id FROM model_instance WHERE weather_id IS NOT NULL)"
     )
     suspend fun getUnsyncedSnapshots(deviceId: String): List<SnapshotWithCache>
 

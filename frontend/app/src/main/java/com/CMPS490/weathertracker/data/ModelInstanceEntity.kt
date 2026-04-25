@@ -17,4 +17,5 @@ data class ModelInstanceEntity(
     @ColumnInfo(name = "confidence_score") val confidenceScore: Float,
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "synced_at") val syncedAt: Long? = null,
+    @ColumnInfo(name = "weather_id") val weatherId: String? = null,
 )

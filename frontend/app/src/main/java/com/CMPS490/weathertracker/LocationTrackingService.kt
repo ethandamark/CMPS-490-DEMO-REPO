@@ -397,6 +397,14 @@ class LocationTrackingService : Service() {
             val nowMs = System.currentTimeMillis()
             val hourMs = (nowMs / MILLIS_PER_HOUR) * MILLIS_PER_HOUR  // round to current hour
 
+            // Claim the snapshot slot eagerly so that any location callbacks that fire
+            // while this coroutine is awaiting network responses don't see hourElapsed=true
+            // and launch duplicate predictions.
+            lastSnapshotTimeMs = nowMs
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putLong(PREF_LAST_SNAPSHOT_TIME, lastSnapshotTimeMs)
+                .apply()
+
             val db = WeatherDatabase.getInstance(this)
 
             // Fetch current weather from Open-Meteo
@@ -477,18 +485,7 @@ class LocationTrackingService : Service() {
 
             db.weatherCacheDao().upsert(cacheEntity)
 
-            // Clear is_current flag and insert new snapshot
-            db.offlineWeatherSnapshotDao().clearCurrentFlag(deviceId)
             val snapshotId = deterministicSnapshotId(cacheId)
-            db.offlineWeatherSnapshotDao().upsertSnapshot(
-                OfflineWeatherSnapshotEntity(
-                    weatherId = snapshotId,
-                    deviceId = deviceId,
-                    cacheId = cacheId,
-                    syncedAt = null,
-                    isCurrent = true,
-                )
-            )
 
             // Prune observations older than 48 h
             val cutoff48h = nowMs - 48 * MILLIS_PER_HOUR
@@ -498,8 +495,24 @@ class LocationTrackingService : Service() {
             // Backfill any hours we missed while offline with actual observations
             backfillMissedObservations(deviceId, latitude, longitude, hourMs, db)
 
-            // Seed 24h of historical weather on first run so predictor has history
+            // Seed 24h of historical weather on first run so predictor has history.
+            // seedWeatherHistory() may upsert the current-hour snapshot with
+            // syncedAt = now (marking it as already-synced), so we write the
+            // current observation snapshot AFTER seeding to guarantee synced_at = null.
             seedWeatherHistory(deviceId, latitude, longitude, db)
+
+            // (Re-)insert the current observation snapshot after seed/backfill so it
+            // always has synced_at = null and is_current = true — eligible for sync.
+            db.offlineWeatherSnapshotDao().clearCurrentFlag(deviceId)
+            db.offlineWeatherSnapshotDao().upsertSnapshot(
+                OfflineWeatherSnapshotEntity(
+                    weatherId = snapshotId,
+                    deviceId = deviceId,
+                    cacheId = cacheId,
+                    syncedAt = null,
+                    isCurrent = true,
+                )
+            )
 
             // Run on-device prediction only when requested (hourly timer)
             if (runPrediction) {
@@ -538,6 +551,7 @@ class LocationTrackingService : Service() {
                             resultType = resultType,
                             confidenceScore = result.stormProbability,
                             createdAt = nowMs,
+                            weatherId = snapshotId,
                         )
                     )
                     // Prune synced model instances older than 48h
@@ -546,12 +560,6 @@ class LocationTrackingService : Service() {
             } else {
                 Log.d(TAG, "📦 Snapshot stored (prediction skipped)")
             }
-
-            // Mark snapshot time so hourly timer knows when we last ran (persist across restarts)
-            lastSnapshotTimeMs = System.currentTimeMillis()
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putLong(PREF_LAST_SNAPSHOT_TIME, lastSnapshotTimeMs)
-                .apply()
         } catch (e: Exception) {
             Log.e(TAG, "Error storing weather snapshot", e)
         }
@@ -851,11 +859,9 @@ class LocationTrackingService : Service() {
                 .apply()
         } catch (e: Exception) {
             Log.e(TAG, "🌱 Weather history seed error", e)
-            // Reset flag (memory + prefs) so the seed is retried next time
-            hasSeededHistory.set(false)
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                .putBoolean(PREF_HAS_SEEDED_HISTORY, false)
-                .apply()
+            // Leave hasSeededHistory=true so a concurrent storeWeatherSnapshot coroutine
+            // doesn't enter seed again and create a duplicate.  The next hourly run will
+            // re-seed automatically if Room still has < 12 rows (existing.size check above).
         }
     }
 

@@ -93,6 +93,7 @@ import java.time.format.TextStyle
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import com.CMPS490.weathertracker.sync.SnapshotSyncManager
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import androidx.lifecycle.lifecycleScope
@@ -256,10 +257,6 @@ class MainActivity : ComponentActivity() {
                                     // Do NOT persist — LaunchedEffect will persist once both are granted
                                     // Open app's permission settings for location
                                     openLocationPermissionSettings()
-                                    // Also request notification permission (Android 13+)
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF4CAF50)
@@ -789,6 +786,7 @@ class MainActivity : ComponentActivity() {
                         if (OpenMeteoFallback.checkBackendHealth()) {
                             Log.d("MainActivity", "✓ Backend connection restored")
                             backendConnected = true
+                            SnapshotSyncManager.triggerImmediateSync(this@MainActivity)
                             retryTrigger++
                             break
                         }

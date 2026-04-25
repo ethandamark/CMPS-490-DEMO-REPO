@@ -13,7 +13,7 @@ An Android weather tracking application with on-device ML severe-weather predict
 │   │       │   ├── data/    # Room DB entities, DAOs, ForecastFetcher
 │   │       │   ├── ml/      # FeatureAssemblyService, on-device prediction
 │   │       │   ├── network/ # Retrofit API interface + client
-│   │       │   └── sync/    # SnapshotSyncManager (WorkManager + WiFi)
+│   │       │   └── sync/    # SnapshotSyncManager (WorkManager + Reconnection to Backend)
 │   │       └── res/         # Drawables, mipmaps, values
 │   ├── build.gradle.kts
 │   └── gradle/              # Version catalog + wrapper

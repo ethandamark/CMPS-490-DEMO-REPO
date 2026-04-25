@@ -1,10 +1,6 @@
 package com.CMPS490.weathertracker.sync
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -38,7 +34,6 @@ object ModelInstanceSyncManager {
 
     fun init(context: Context) {
         schedulePeriodicSync(context)
-        registerReconnectCallback(context)
     }
 
     fun schedulePeriodicSync(context: Context) {
@@ -77,36 +72,6 @@ object ModelInstanceSyncManager {
         Log.d(TAG, "One-shot model-instance sync enqueued (deduplicated)")
     }
 
-    private fun registerReconnectCallback(context: Context) {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-
-        cm.registerNetworkCallback(
-            request,
-            object : ConnectivityManager.NetworkCallback() {
-                // Only sync when we regain connectivity after a real loss.
-                // onAvailable fires immediately on registration if already
-                // connected — we must ignore that initial fire.
-                private var hadLoss = false
-
-                override fun onLost(network: Network) {
-                    hadLoss = true
-                    Log.d(TAG, "Network lost — will sync model instances on reconnect")
-                }
-
-                override fun onAvailable(network: Network) {
-                    if (hadLoss) {
-                        hadLoss = false
-                        Log.d(TAG, "Network reconnected — triggering model-instance sync")
-                        triggerImmediateSync(context)
-                    }
-                    // else: initial registration callback while already connected — skip
-                }
-            },
-        )
-    }
 }
 
 /**
@@ -148,6 +113,7 @@ class ModelInstanceSyncWorker(
                 addProperty("result_type", item.resultType)
                 addProperty("confidence_score", item.confidenceScore.toDouble())
                 addProperty("created_at", item.createdAt)
+                item.weatherId?.let { addProperty("weather_id", it) }
             }
             instancesArray.add(obj)
         }
