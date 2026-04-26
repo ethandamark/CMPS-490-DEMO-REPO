@@ -23,6 +23,7 @@ import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
+import com.CMPS490.weathertracker.network.BackendConfig
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -779,7 +780,7 @@ class LocationTrackingService : Service() {
             val requestBody = jsonBody.toString()
                 .toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
-                .url("http://10.0.2.2:5000/devices/$deviceId/seed-weather-history")
+                        .url(BackendConfig.endpoint("/devices/$deviceId/seed-weather-history"))
                 .post(requestBody)
                 .build()
 
