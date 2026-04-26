@@ -7,7 +7,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Retrofit instance for local FastAPI backend
- * Base URL: http://localhost:5000 (emulator) or http://10.0.2.2:5000 (Android device)
+ * Emulator: http://10.0.2.2:5000
+ * Physical device (adb reverse): http://127.0.0.1:5000
  */
 object BackendRetrofitInstance {
     
@@ -20,9 +21,7 @@ object BackendRetrofitInstance {
     }
 
     private val retrofit by lazy {
-        // Use 10.0.2.2 for emulator, localhost for physical devices
-        // The backend should be running on http://localhost:5000
-        val baseUrl = "http://10.0.2.2:5000/"
+        val baseUrl = BackendConfig.baseUrl
         
         Retrofit.Builder()
             .baseUrl(baseUrl)

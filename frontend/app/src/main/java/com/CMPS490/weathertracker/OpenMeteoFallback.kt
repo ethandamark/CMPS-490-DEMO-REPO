@@ -3,6 +3,7 @@ package com.CMPS490.weathertracker
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.CMPS490.weathertracker.network.BackendConfig
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -121,7 +122,7 @@ object OpenMeteoFallback {
     suspend fun checkBackendHealth(): Boolean = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
-                .url("http://10.0.2.2:5000/health")
+                .url(BackendConfig.endpoint("/health"))
                 .build()
             val response = httpClient.newCall(request).execute()
             response.isSuccessful
