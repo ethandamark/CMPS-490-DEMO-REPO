@@ -1,4 +1,4 @@
-# Weather Tracker
+# TempestAI
 
 An Android weather tracking application with on-device ML severe-weather predictions, backed by a FastAPI server and Supabase PostgreSQL.
 
@@ -25,10 +25,6 @@ An Android weather tracking application with on-device ML severe-weather predict
 │   ├── tests/               # pytest integration tests
 │   ├── requirements.txt
 │   └── .env.example
-│
-├── lib/                      # Shared Python ML library
-│   ├── inference.py          # Joblib model loading + predict()
-│   └── ml/                   # Feature assembly, live weather, prediction service
 │
 ├── supabase/                 # Supabase edge functions
 │   └── functions/
@@ -93,71 +89,67 @@ Install on a connected emulator/device via Android Studio or `adb install`.
 |--------|-------|-------------|
 | `GET` | `/health` | Health check |
 
-### Weather & Radar (NWS / RainViewer Proxies)
+### Weather (NWS Proxies)
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `GET` | `/weather/points/{lat}/{lon}` | NWS grid-point metadata |
-| `GET` | `/weather/forecast` | NWS forecast from grid URL |
+| `GET` | `/weather/forecast` | NWS gridpoint forecast |
+| `GET` | `/weather/hourly` | NWS hourly forecast |
 | `GET` | `/weather/alerts` | NWS active alerts for a point |
-| `GET` | `/rainviewer/maps` | RainViewer radar tile URLs |
+| `GET` | `/weather/points` | NWS grid-point metadata |
+| `GET` | `/weather/stations` | NWS stations |
+| `GET` | `/weather/observations` | NWS observations |
+| `GET` | `/weather/zones` | NWS zones |
+| `GET` | `/weather/products` | NWS products |
+
+### Radar
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/rainviewer/maps` | RainViewer radar tile manifest (5-min TTL cache) |
 
 ### Device Registration & Management
 
 | Method | Route | Description |
 |--------|-------|-------------|
 | `POST` | `/supabase/register` | Register anonymous user + device |
-| `PATCH` | `/supabase/device` | Update device attributes (permissions, last seen) |
+| `PATCH` | `/supabase/device` | Update device metadata |
+| `GET` | `/supabase/device/{device_id}` | Fetch device record |
+| `GET` | `/supabase/snapshots/{device_id}` | Fetch offline snapshots for a device |
 
 ### Device Location
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `POST` | `/device-location/create` | Create a location record |
-| `POST` | `/device-location/update-current` | Upsert current GPS position (background tracking) |
-| `GET` | `/device-location/by-device/{device_id}` | All locations for a device |
-| `GET` | `/device-location/latest/{device_id}` | Most recent location |
-| `GET` | `/device-location/{location_id}` | Single location |
-| `PATCH` | `/device-location/{location_id}` | Update a location |
-| `DELETE` | `/device-location/{location_id}` | Delete a location |
-
-### Alerts
-
-| Method | Route | Description |
-|--------|-------|-------------|
-| `POST` | `/alerts/create` | Create an ML-generated alert event |
-| `GET` | `/alerts/active` | Active (non-expired) alerts, optionally filtered by radius |
-| `GET` | `/alerts/{alert_id}` | Single alert |
-| `DELETE` | `/alerts/{alert_id}` | Delete an alert |
-| `GET` | `/device-alerts/{device_id}` | Delivery records for a device |
-| `GET` | `/device-alerts/by-alert/{alert_id}` | Delivery status per device for an alert |
-| `DELETE` | `/device-alerts/cleanup` | Purge old device-alert rows (30-day default) |
+| `POST` | `/device-location/update-current` | Upsert current GPS position — at most one row per device |
 
 ### ML & Sync
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `POST` | `/devices/{device_id}/seed-weather-history` | Seed 24 h of Open-Meteo weather into Supabase |
-| `POST` | `/devices/{device_id}/sync-snapshots` | Upsert weather cache + offline snapshots from client |
-| `GET` | `/devices/{device_id}/snapshots` | Retrieve offline weather snapshots |
-| `POST` | `/devices/{device_id}/model-instance` | Record an on-device ML prediction result |
+| `POST` | `/devices/{device_id}/seed-weather-history` | Seed 24 h of Open-Meteo weather history into Supabase |
+| `POST` | `/devices/{device_id}/sync-snapshots` | Bulk upload offline weather snapshots |
+| `POST` | `/devices/{device_id}/model-instance` | Save a single on-device ML prediction result |
+| `POST` | `/devices/{device_id}/sync-model-instances` | Bulk upload model instance predictions |
 
 ## Database
 
-Supabase PostgreSQL with 12 tables. See [documentation/docs/db.md](documentation/docs/db.md) for the full schema.
+Supabase PostgreSQL + Android Room DB. See [documentation/docs/db.md](documentation/docs/db.md) for the full schema.
 
-**Core tables:** `anonymous_user`, `device`, `device_location`, `weather_cache`, `model_instance`, `alert_event`, `device_alert`, `offline_weather_snapshot`
+**Supabase tables:** `anonymous_user`, `device`, `device_location`, `offline_weather_snapshot`, `model_instance`
+
+**Room DB tables (24 h retention, pruned each location update):** `weather_cache`, `offline_weather_snapshot`, `model_instance`, `hourly_prediction`
 
 ## ML Pipeline
 
-The app runs a 37-feature XGBoost model on-device via ONNX Runtime:
+The model was trained offline using XGBoost + scikit-learn (saved as a joblib artifact), then converted to ONNX format and bundled directly into the Android app (`assets/ml/model.onnx`). All inference runs on-device — no data is ever sent to a server for prediction.
 
-1. **Weather history** is seeded from Open-Meteo (24 h hourly) at first launch
-2. **Feature assembly** builds the input vector (surface obs, derived rates, temporal, geographic, NWP, radar)
-3. **On-device inference** produces a storm probability + calibrated confidence via isotonic regression
-4. **Results** are stored in `model_instance` and synced to Supabase
-
-Server-side joblib models (`lib/models/`) support the same pipeline for testing and comparison.
+1. **Observation collection** — last 24 h of `weather_cache` rows from Room DB (max 24 records)
+2. **Feature assembly** — 26 base features: raw (5) · precipitation (4) · pressure (5) · wind/temp (5) · temporal (3) · static/geographic (4)
+3. **NWP passthrough** — 7 features direct from Open-Meteo: CAPE · CIN · PWAT · SRH03 · LI · LCL · `nwp_available` flag
+4. **ONNX inference + isotonic calibration** — `model.onnx` (v1.0.0) loaded via ONNX Runtime; raw probability mapped through a lookup table to a calibrated score
+5. **Result storage** — `model_instance` written to Room DB and synced to Supabase hourly
+6. **Alert decision** — notification fires when calibrated probability ≥ 0.4901 or an active NWS alert exists for the area
 
 ## Offline / Fallback Behavior
 
@@ -187,8 +179,14 @@ cp backend/.env.example backend/.env
 
 - **Frontend:** Kotlin, Jetpack Compose (Material 3), Google Maps SDK, Room, Retrofit / OkHttp, ONNX Runtime, WorkManager, Accompanist Permissions
 - **Backend:** FastAPI, Uvicorn, httpx
-- **ML:** XGBoost, scikit-learn, ONNX, joblib, pandas, numpy
+- **ML:** XGBoost + scikit-learn (offline training, joblib export → ONNX conversion), ONNX Runtime (on-device inference), pandas, numpy
 - **Database:** Supabase (PostgreSQL), Row-Level Security
 - **Weather Data:** National Weather Service API, Open-Meteo API, RainViewer API
 
 ## Contributors
+- Roland Okungbowa
+- Abigail Choate
+- Ethan Marks
+- Rayden Farmer
+- Michael Bray
+- Tucker Styles
