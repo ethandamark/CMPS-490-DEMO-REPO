@@ -35,119 +35,127 @@
 
 ## Database Schema
 
+The app uses two storage layers: **Supabase** (cloud, permanent record) and **Room DB** (Android local, 24 h rolling window pruned on each location update).
+
 ### Enum Types
 
 | Enum Name | Values |
 |-----------|--------|
 | `status_enum` | 'active', 'inactive' |
-| `platform_enum` | 'android', 'ios' |
-| `weather_condition_enum` | 'rain', 'clean' |
-| `alert_type_enum` | 'storm', 'flood' |
-| `delivery_status_enum` | 'pending', 'sent', 'failed' |
+| `snapshot_type` | enum — identifies the type of an offline weather snapshot |
 
-### Tables
+---
+
+## Supabase Tables (Cloud)
+
+Tables are related left → right: `anonymous_user` → `device` → `device_location` / `offline_weather_snapshot` → `model_instance`
 
 #### 1. anonymous_user
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `anon_user_id` | UUID | PRIMARY KEY |
-| `created_at` | TIMESTAMP | NOT NULL |
-| `last_active_at` | TIMESTAMP | |
+| `id` | UUID | PRIMARY KEY |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `last_active_at` | TIMESTAMPTZ | |
 | `status` | status_enum | DEFAULT 'active' |
+
+> Marked inactive by `pg_cron` job `deactivate_stale_accounts()` daily at 3 AM UTC for accounts inactive > 30 days.
 
 #### 2. device
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `device_id` | UUID | PRIMARY KEY |
-| `anon_user_id` | UUID | UNIQUE, FK → anonymous_user |
-| `alert_token` | TEXT | UNIQUE |
-| `platform` | platform_enum | |
+| `device_id` | TEXT | PRIMARY KEY |
+| `user_id` | UUID | FK → anonymous_user |
+| `platform` | TEXT | |
 | `app_version` | VARCHAR(50) | |
-| `location_permission_status` | BOOLEAN | |
 | `notifications_enabled` | BOOLEAN | DEFAULT false |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | |
 
 #### 3. device_location
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `location_id` | UUID | PRIMARY KEY |
-| `device_id` | UUID | FK → device |
+| `id` | BIGSERIAL | PRIMARY KEY |
+| `device_id` | TEXT | FK → device, **UNIQUE** |
 | `latitude` | DECIMAL(9,6) | |
 | `longitude` | DECIMAL(9,6) | |
-| `captured_at` | TIMESTAMP | |
+| `updated_at` | TIMESTAMPTZ | |
 
-#### 4. weather_cache
+> Enforces a 1:1 relationship with `device` via `UNIQUE(device_id)` (migration 020). The backend uses UPSERT — at most one row per device at all times.
+
+#### 4. offline_weather_snapshot
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `cache_id` | UUID | PRIMARY KEY |
-| `temp` | DECIMAL(5,2) | |
-| `humidity` | DECIMAL(5,2) | |
-| `wind_speed` | DECIMAL(6,2) | |
-| `wind_direction` | DECIMAL(5,2) | |
-| `precipitation_amount` | DECIMAL(6,2) | |
-| `pressure` | DECIMAL(7,2) | |
-| `weather_condition` | weather_condition_enum | |
-| `recorded_at` | TIMESTAMP | |
+| `id` | BIGSERIAL | PRIMARY KEY |
+| `device_id` | TEXT | FK → device |
+| `snapshot_time` | TIMESTAMPTZ | |
 | `latitude` | DECIMAL(9,6) | |
 | `longitude` | DECIMAL(9,6) | |
-| `result_level` | INT | CHECK 0-5 |
-| `result_type` | TEXT | CHECK IN ('storm', 'clear') |
+| `weather_data` | JSONB | |
+| `snapshot_type` | snapshot_type | |
+| `is_simulation_sentinel` | BOOLEAN | |
 
 #### 5. model_instance
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `instance_id` | UUID | PRIMARY KEY |
-| `version` | VARCHAR(50) | |
-| `latitude` | DECIMAL(9,6) | |
-| `longitude` | DECIMAL(9,6) | |
-| `result_level` | INT | CHECK 0-5 |
-| `result_type` | TEXT | CHECK IN ('storm', 'clear') |
-| `confidence_score` | DECIMAL(5,4) | |
-| `created_at` | TIMESTAMP | |
+| `id` | BIGSERIAL | PRIMARY KEY |
+| `snapshot_id` | BIGINT | FK → offline_weather_snapshot |
+| `device_id` | TEXT | FK → device |
+| `model_version` | VARCHAR(50) | |
+| `prediction_score` | DECIMAL(5,4) | |
+| `feature_vector` | JSONB | |
+| `predicted_at` | TIMESTAMPTZ | |
 
-#### 6. alert_event
+---
 
-| Attribute | Type | Constraints |
-|-----------|------|-------------|
-| `alert_id` | UUID | PRIMARY KEY |
-| `instance_id` | UUID | FK → model_instance |
-| `latitude` | DECIMAL(9,6) | |
-| `longitude` | DECIMAL(9,6) | |
-| `alert_type` | alert_type_enum | |
-| `severity_level` | INT | CHECK 0-5 |
-| `created_at` | TIMESTAMP | |
-| `expires_at` | TIMESTAMP | |
+## Room DB Tables (Android Local)
 
-#### 7. device_alert
+All four tables are pruned on every location update — rows older than 24 h are deleted. Backfill queries are capped at 24 records.
 
-| Attribute | Type | Constraints |
-|-----------|------|-------------|
-| `device_alert_id` | UUID | PRIMARY KEY |
-| `device_id` | UUID | FK → device |
-| `alert_id` | UUID | FK → alert_event |
-| `delivery_status` | delivery_status_enum | |
-| `sent_at` | TIMESTAMP | |
+#### 1. weather_cache
 
-#### 8. offline_weather_snapshot
+| Attribute | Notes |
+|-----------|-------|
+| `id` | PRIMARY KEY |
+| `device_id` | |
+| `timestamp_ms` | |
+| `latitude`, `longitude` | |
+| `temp_c` | Surface observation |
+| `pressure_hPa` | Surface observation |
+| `humidity_pct` | Surface observation |
+| `wind_speed_kmh` | Surface observation |
+| `precip_mm` | Surface observation |
+| `cape`, `cin`, `pwat`, `srh03`, `li`, `lcl` | NWP features from Open-Meteo |
+| `mrms_max_dbz_75km` | Reserved — null |
 
-| Attribute | Type | Constraints |
-|-----------|------|-------------|
-| `weather_id` | UUID | PRIMARY KEY |
-| `device_id` | UUID | FK → device |
-| `cache_id` | UUID | FK → weather_cache |
-| `synced_at` | TIMESTAMP | |
-| `is_current` | BOOLEAN | |
+#### 2. offline_weather_snapshot
 
-#### 9. offline_alert_snapshot
+| Attribute | Notes |
+|-----------|-------|
+| `id` | PRIMARY KEY |
+| `device_id` | |
+| `snapshot_time_ms` | |
+| `latitude`, `longitude` | |
+| `weather_data` | JSON string |
+| `is_synced` | Set to `true` after successful POST to backend |
 
-| Attribute | Type | Constraints |
-|-----------|------|-------------|
-| `offline_alert_id` | UUID | PRIMARY KEY |
-| `device_id` | UUID | FK → device |
-| `alert_id` | UUID | FK → alert_event |
-| `synced_at` | TIMESTAMP | |
-| `is_current` | BOOLEAN | |
+#### 3. model_instance
+
+| Attribute | Notes |
+|-----------|-------|
+| `id` | PRIMARY KEY |
+| `snapshot_id` | FK → offline_weather_snapshot |
+| `device_id` | |
+| `model_version` | |
+| `prediction_score` | |
+| `feature_vector` | JSON string |
+| `predicted_at_ms` | |
+| `is_synced` | Set to `true` after successful POST to backend |
+
+#### 4. hourly_prediction
+
+Local-only timeline used to render the storm risk chart in the UI. Not synced to Supabase. Pruned > 24 h.
