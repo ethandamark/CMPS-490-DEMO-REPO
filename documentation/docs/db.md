@@ -42,7 +42,8 @@ The app uses two storage layers: **Supabase** (cloud, permanent record) and **Ro
 | Enum Name | Values |
 |-----------|--------|
 | `status_enum` | 'active', 'inactive' |
-| `snapshot_type` | enum — identifies the type of an offline weather snapshot |
+| `platform_enum` | platform identifier for the device (e.g. 'android') |
+| `snapshot_type_enum` | identifies the type of an offline weather snapshot (e.g. 'hourly') |
 
 ---
 
@@ -54,9 +55,9 @@ Tables are related left → right: `anonymous_user` → `device` → `device_loc
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `id` | UUID | PRIMARY KEY |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `last_active_at` | TIMESTAMPTZ | |
+| `anon_user_id` | UUID | PRIMARY KEY |
+| `created_at` | TIMESTAMP | NOT NULL |
+| `last_active_at` | TIMESTAMP | |
 | `status` | status_enum | DEFAULT 'active' |
 
 > Marked inactive by `pg_cron` job `deactivate_stale_accounts()` daily at 3 AM UTC for accounts inactive > 30 days.
@@ -65,23 +66,22 @@ Tables are related left → right: `anonymous_user` → `device` → `device_loc
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `device_id` | TEXT | PRIMARY KEY |
-| `user_id` | UUID | FK → anonymous_user |
-| `platform` | TEXT | |
+| `device_id` | UUID | PRIMARY KEY |
+| `anon_user_id` | UUID | FK → anonymous_user, **UNIQUE** |
+| `platform` | platform_enum | |
 | `app_version` | VARCHAR(50) | |
+| `location_permission_status` | BOOLEAN | |
 | `notifications_enabled` | BOOLEAN | DEFAULT false |
-| `created_at` | TIMESTAMPTZ | |
-| `updated_at` | TIMESTAMPTZ | |
 
 #### 3. device_location
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `id` | BIGSERIAL | PRIMARY KEY |
-| `device_id` | TEXT | FK → device, **UNIQUE** |
+| `location_id` | UUID | PRIMARY KEY |
+| `device_id` | UUID | FK → device, **UNIQUE** |
 | `latitude` | DECIMAL(9,6) | |
 | `longitude` | DECIMAL(9,6) | |
-| `updated_at` | TIMESTAMPTZ | |
+| `captured_at` | TIMESTAMP | |
 
 > Enforces a 1:1 relationship with `device` via `UNIQUE(device_id)` (migration 020). The backend uses UPSERT — at most one row per device at all times.
 
@@ -89,27 +89,26 @@ Tables are related left → right: `anonymous_user` → `device` → `device_loc
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `id` | BIGSERIAL | PRIMARY KEY |
-| `device_id` | TEXT | FK → device |
-| `snapshot_time` | TIMESTAMPTZ | |
-| `latitude` | DECIMAL(9,6) | |
-| `longitude` | DECIMAL(9,6) | |
+| `weather_id` | UUID | PRIMARY KEY |
+| `device_id` | UUID | FK → device |
+| `synced_at` | TIMESTAMP | |
+| `is_current` | BOOLEAN | |
 | `weather_data` | JSONB | |
-| `snapshot_type` | snapshot_type | |
-| `is_simulation_sentinel` | BOOLEAN | |
+| `snapshot_type` | snapshot_type_enum | DEFAULT 'hourly' |
 
 #### 5. model_instance
 
 | Attribute | Type | Constraints |
 |-----------|------|-------------|
-| `id` | BIGSERIAL | PRIMARY KEY |
-| `snapshot_id` | BIGINT | FK → offline_weather_snapshot |
-| `device_id` | TEXT | FK → device |
-| `model_version` | VARCHAR(50) | |
-| `prediction_score` | DECIMAL(5,4) | |
-| `feature_vector` | JSONB | |
-| `predicted_at` | TIMESTAMPTZ | |
-
+| `instance_id` | UUID | PRIMARY KEY |
+| `version` | VARCHAR(50) | |
+| `latitude` | DECIMAL(9,6) | |
+| `longitude` | DECIMAL(9,6) | |
+| `result_level` | INTEGER | CHECK (0–5) |
+| `result_type` | TEXT | CHECK ('storm', 'clear') |
+| `confidence_score` | DECIMAL(5,4) | |
+| `created_at` | TIMESTAMP | |
+| `weather_id` | UUID | FK → offline_weather_snapshot |
 ---
 
 ## Room DB Tables (Android Local)
