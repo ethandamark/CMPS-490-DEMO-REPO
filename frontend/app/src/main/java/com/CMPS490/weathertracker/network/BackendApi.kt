@@ -6,6 +6,7 @@ import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.PATCH
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
 import com.google.gson.JsonObject
@@ -67,6 +68,11 @@ interface BackendApi {
         @Path("device_id") deviceId: String,
         @Query("since") since: String?,
     ): Call<JsonObject>
+
+    // ===== MODEL INSTANCE =====
+    // ===== SIMULATION =====
+    @PUT("simulation/sentinel")
+    fun updateSimulationSentinel(@Body request: JsonObject): Call<JsonObject>
 
     // ===== MODEL INSTANCE =====
     @POST("devices/{device_id}/model-instance")

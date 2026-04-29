@@ -70,6 +70,10 @@ class StormSimulationActivity : ComponentActivity() {
                 db.weatherCacheDao().upsertAll(entries)
                 Log.d(TAG, "✓ Inserted ${entries.size} Katrina weather snapshots")
 
+                // Upload Katrina rows to the simulation sentinel snapshot so the
+                // weather history is visible in the backend / Supabase dashboard.
+                uploadSentinelWeatherData(entries)
+
                 // Assemble features and run prediction
                 val features = FeatureAssemblyService(db).assembleFeatures(LAT, LON)
                 if (features.isEmpty()) {
@@ -197,6 +201,47 @@ class StormSimulationActivity : ComponentActivity() {
                 nwpAvailableLeads = 6.0,  // all forecast leads available
                 mrmsMaxDbz75km = null,
             )
+        }
+    }
+
+    private fun uploadSentinelWeatherData(entries: List<WeatherCacheEntity>) {
+        try {
+            val weatherArray = com.google.gson.JsonArray()
+            for (e in entries) {
+                weatherArray.add(com.google.gson.JsonObject().apply {
+                    addProperty("cache_id", e.cacheId)
+                    e.temp?.let { addProperty("temp", it) }
+                    e.humidity?.let { addProperty("humidity", it) }
+                    e.windSpeed?.let { addProperty("wind_speed", it) }
+                    e.windDirection?.let { addProperty("wind_direction", it) }
+                    e.precipitationAmount?.let { addProperty("precipitation_amount", it) }
+                    e.pressure?.let { addProperty("pressure", it) }
+                    addProperty("recorded_at_ms", e.recordedAt)
+                    addProperty("latitude", e.latitude)
+                    addProperty("longitude", e.longitude)
+                    addProperty("is_forecast", e.isForecast)
+                    e.dewPointC?.let { addProperty("dew_point_c", it) }
+                    e.elevation?.let { addProperty("elevation", it) }
+                    e.distToCoastKm?.let { addProperty("dist_to_coast_km", it) }
+                    e.nwpCapeF36Max?.let { addProperty("nwp_cape_f36_max", it) }
+                    e.nwpCinF36Max?.let { addProperty("nwp_cin_f36_max", it) }
+                    e.nwpPwatF36Max?.let { addProperty("nwp_pwat_f36_max", it) }
+                    e.nwpSrh03F36Max?.let { addProperty("nwp_srh03_f36_max", it) }
+                    e.nwpLiF36Min?.let { addProperty("nwp_li_f36_min", it) }
+                    e.nwpLclF36Min?.let { addProperty("nwp_lcl_f36_min", it) }
+                })
+            }
+            val body = com.google.gson.JsonObject().apply {
+                add("weather_data", weatherArray)
+            }
+            val response = BackendRetrofitInstance.api.updateSimulationSentinel(body).execute()
+            if (response.isSuccessful) {
+                Log.d(TAG, "✓ Simulation sentinel updated with ${entries.size} Katrina rows")
+            } else {
+                Log.w(TAG, "✗ Sentinel upload failed: ${response.code()}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "✗ Sentinel upload error: ${e.message}")
         }
     }
 

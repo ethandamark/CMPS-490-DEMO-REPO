@@ -500,7 +500,9 @@ class LocationTrackingService : Service() {
             // seedWeatherHistory() may upsert the current-hour snapshot with
             // syncedAt = now (marking it as already-synced), so we write the
             // current observation snapshot AFTER seeding to guarantee synced_at = null.
-            seedWeatherHistory(deviceId, latitude, longitude, db)
+            // Returns true when it ran the prediction itself (on seeded data), so we
+            // can skip the redundant prediction pass below.
+            val justSeeded = seedWeatherHistory(deviceId, latitude, longitude, db, snapshotId, hourMs, nowMs)
 
             // (Re-)insert the current observation snapshot after seed/backfill so it
             // always has synced_at = null and is_current = true — eligible for sync.
@@ -515,8 +517,9 @@ class LocationTrackingService : Service() {
                 )
             )
 
-            // Run on-device prediction only when requested (hourly timer)
-            if (runPrediction) {
+            // Run on-device prediction only when requested (hourly timer) and only if
+            // seed didn't already run it on the freshly seeded data this cycle.
+            if (runPrediction && !justSeeded) {
                 val featureService = FeatureAssemblyService(db)
                 val features = featureService.assembleFeatures(latitude, longitude)
                 if (features.isNotEmpty()) {
@@ -749,13 +752,24 @@ class LocationTrackingService : Service() {
      * On first run, call the backend to fetch 24 h of historical weather
      * from Open-Meteo → Supabase → Room DB.  Skips if Room already has ≥ 12 rows.
      */
+    /**
+     * Seeds 24 h of weather history from the backend on first run.
+     *
+     * Returns `true` if seed ran and the on-device prediction was executed on the
+     * freshly seeded data, `false` if the seed was skipped or failed.  The caller
+     * (`storeWeatherSnapshot`) uses this flag to avoid running a second prediction
+     * immediately afterward — the model already ran on the seeded data.
+     */
     private suspend fun seedWeatherHistory(
         deviceId: String,
         latitude: Double,
         longitude: Double,
         db: WeatherDatabase,
-    ) {
-        if (!hasSeededHistory.compareAndSet(false, true)) return
+        snapshotId: String,
+        hourMs: Long,
+        nowMs: Long,
+    ): Boolean {
+        if (!hasSeededHistory.compareAndSet(false, true)) return false
 
         // Check if Room DB already has enough observations
         val delta = 5.0 * 0.009
@@ -767,7 +781,7 @@ class LocationTrackingService : Service() {
         )
         if (existing.size >= 12) {
             Log.d(TAG, "⏭ Room DB already has ${existing.size} observations, skipping history seed")
-            return
+            return false
         }
 
         try {
@@ -787,14 +801,14 @@ class LocationTrackingService : Service() {
             val response = httpClient.newCall(request).execute()
             if (!response.isSuccessful) {
                 Log.w(TAG, "🌱 Seed request failed: ${response.code}")
-                return
+                return false
             }
 
-            val body = response.body?.string() ?: return
+            val body = response.body?.string() ?: return false
             val json = JSONObject(body)
-            if (!json.optBoolean("success", false)) return
+            if (!json.optBoolean("success", false)) return false
 
-            val rows = json.optJSONArray("weather_rows") ?: return
+            val rows = json.optJSONArray("weather_rows") ?: return false
             val entities = mutableListOf<WeatherCacheEntity>()
             val snapshots = mutableListOf<OfflineWeatherSnapshotEntity>()
 
@@ -803,7 +817,11 @@ class LocationTrackingService : Service() {
                 val recordedAtMs = row.optLong("recorded_at_ms", 0L)
                 if (recordedAtMs == 0L) continue
 
-                val isForecast = row.optBoolean("is_forecast", false)
+                // Derive isForecast from the row's timestamp relative to now —
+                // the same distinction the sync worker uses: past rows are observations,
+                // future rows are forecasts.  This is more robust than trusting the
+                // backend-supplied is_forecast field which could be missing or mismatched.
+                val isForecast = recordedAtMs > System.currentTimeMillis()
                 val cacheId = row.optString("cache_id",
                     deterministicCacheId(latitude, longitude, recordedAtMs, isForecast))
 
@@ -853,16 +871,60 @@ class LocationTrackingService : Service() {
                 val obsCount = entities.count { !it.isForecast }
                 val fcCount = entities.count { it.isForecast }
                 Log.d(TAG, "🌱 Seeded $obsCount observations + $fcCount forecasts into Room DB")
+
+                // Run prediction immediately on the freshly seeded data so the model
+                // result is available right away — no need to wait for the next
+                // storeWeatherSnapshot cycle which would only add one more observation.
+                val featureService = FeatureAssemblyService(db)
+                val features = featureService.assembleFeatures(latitude, longitude)
+                if (features.isNotEmpty()) {
+                    val predictor = OnDevicePredictor.getInstance(this)
+                    val result = predictor.predict(features)
+                    Log.d(TAG, "🤖 Seed prediction: prob=${result.stormProbability}, alert=${result.alertState}")
+
+                    db.hourlyPredictionDao().upsert(
+                        com.CMPS490.weathertracker.data.HourlyPredictionEntity(
+                            timestamp = hourMs,
+                            stormProbability = result.stormProbability,
+                            alertState = result.alertState,
+                            modelVersion = result.modelVersion,
+                        )
+                    )
+                    db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
+
+                    if (result.alertState == 1) {
+                        fireStormNotification(result.stormProbability)
+                    }
+
+                    val resultType = if (result.alertState == 1) "storm" else "clear"
+                    db.modelInstanceDao().upsert(
+                        com.CMPS490.weathertracker.data.ModelInstanceEntity(
+                            instanceId = java.util.UUID.randomUUID().toString(),
+                            deviceId = deviceId,
+                            version = result.modelVersion,
+                            latitude = latitude,
+                            longitude = longitude,
+                            resultLevel = result.alertState,
+                            resultType = resultType,
+                            confidenceScore = result.stormProbability,
+                            createdAt = nowMs,
+                            weatherId = snapshotId,
+                        )
+                    )
+                    db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
+                }
             }
             // Persist the seeded flag so service restarts don't re-seed
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .putBoolean(PREF_HAS_SEEDED_HISTORY, true)
                 .apply()
+            return entities.isNotEmpty()
         } catch (e: Exception) {
             Log.e(TAG, "🌱 Weather history seed error", e)
             // Leave hasSeededHistory=true so a concurrent storeWeatherSnapshot coroutine
             // doesn't enter seed again and create a duplicate.  The next hourly run will
             // re-seed automatically if Room still has < 12 rows (existing.size check above).
+            return false
         }
     }
 

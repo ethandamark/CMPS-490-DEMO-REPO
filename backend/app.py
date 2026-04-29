@@ -55,6 +55,40 @@ def deterministic_location_id(device_id: str) -> str:
 
 app = FastAPI(title="Weather Tracker API", version="1.0.0")
 
+
+@app.on_event("startup")
+async def _seed_simulation_sentinel():
+    """
+    Upsert the simulation sentinel row on every backend startup so the
+    Katrina weather history is always visible in Supabase — regardless of
+    whether any device has triggered a seed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
+                json=[{
+                    "weather_id": "00000000-0000-0000-0000-000000000000",
+                    "device_id": None,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                    "is_current": True,
+                    "weather_data": _build_katrina_weather_data(),
+                    "snapshot_type": "seed",
+                }],
+                headers={
+                    "apikey": SUPABASE_API_KEY,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=representation,resolution=merge-duplicates",
+                },
+            )
+            if resp.status_code in [200, 201]:
+                logger.info("✓ Simulation sentinel seeded on startup (%d Katrina rows)", 24)
+            else:
+                logger.warning("⚠ Simulation sentinel seed failed on startup: %s %s",
+                               resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("⚠ Could not seed simulation sentinel on startup: %s", e)
+
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
@@ -876,6 +910,28 @@ async def sync_snapshots(device_id: str, request: SyncSnapshotsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/devices/{device_id}/exists")
+async def device_exists(device_id: str):
+    """
+    Return {"exists": true/false} indicating whether a device record is present in
+    Supabase.  Used by the Android client on startup to detect stale SharedPreferences
+    credentials (e.g. after clear_db.py wipes the database) so it can re-register
+    automatically without manual intervention.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{SUPABASE_BASE}/rest/v1/device?device_id=eq.{device_id}&select=device_id",
+                headers={"apikey": SUPABASE_API_KEY, "Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return {"exists": len(resp.json()) > 0}
+            return {"exists": False}
+    except Exception as e:
+        logger.warning("device_exists check error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/devices/{device_id}/snapshots")
 async def get_device_snapshots(device_id: str, since: str | None = None):
     """
@@ -905,6 +961,73 @@ async def get_device_snapshots(device_id: str, since: str | None = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= WEATHER HISTORY SEED =============
+
+def _build_katrina_weather_data() -> list[dict]:
+    """
+    Returns 24 hourly rows of Hurricane Katrina-like conditions (New Orleans,
+    Aug 28–29 2005) with timestamps relative to *now*, matching the field names
+    used by the offline_weather_snapshot weather_data JSONB archive.
+    """
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    hour_ms = 3_600_000
+
+    hourly = [
+        # (hours_ago, temp_c, humidity, pressure_hpa, wind_kmh, precip_mm, dew_point_c)
+        (23, 30.5, 88.0, 990.0,  45.0,  2.0, 28.0),
+        (22, 30.2, 89.0, 988.5,  48.0,  3.0, 28.0),
+        (21, 30.0, 90.0, 986.0,  52.0,  5.0, 28.5),
+        (20, 29.8, 91.0, 983.0,  56.0,  7.0, 28.5),
+        (19, 29.5, 92.0, 980.0,  60.0,  8.0, 28.5),
+        (18, 29.2, 93.0, 977.0,  65.0, 10.0, 28.5),
+        (17, 29.0, 94.0, 973.0,  72.0, 12.0, 28.5),
+        (16, 28.8, 95.0, 969.0,  78.0, 15.0, 28.0),
+        (15, 28.5, 95.0, 965.0,  85.0, 18.0, 28.0),
+        (14, 28.3, 96.0, 960.0,  92.0, 20.0, 27.8),
+        (13, 28.0, 96.0, 955.0, 100.0, 22.0, 27.5),
+        (12, 27.8, 97.0, 950.0, 110.0, 25.0, 27.5),
+        (11, 27.5, 97.0, 945.0, 120.0, 28.0, 27.2),
+        (10, 27.2, 98.0, 940.0, 130.0, 30.0, 27.0),
+        ( 9, 27.0, 98.0, 935.0, 140.0, 32.0, 26.8),
+        ( 8, 26.8, 98.0, 932.0, 148.0, 33.0, 26.5),
+        ( 7, 26.5, 99.0, 928.0, 155.0, 35.0, 26.3),
+        ( 6, 26.2, 99.0, 925.0, 160.0, 35.0, 26.0),
+        ( 5, 26.0, 99.0, 922.0, 170.0, 38.0, 25.8),
+        ( 4, 25.8, 99.0, 920.0, 180.0, 40.0, 25.5),
+        ( 3, 25.5, 99.0, 920.0, 185.0, 42.0, 25.3),
+        ( 2, 25.5, 99.0, 922.0, 175.0, 38.0, 25.3),
+        ( 1, 25.8, 98.0, 925.0, 160.0, 35.0, 25.5),
+        ( 0, 26.0, 98.0, 928.0, 150.0, 30.0, 25.8),
+    ]
+
+    rows = []
+    for hours_ago, temp, humidity, pressure, wind, precip, dew_point in hourly:
+        recorded_at_ms = now_ms - hours_ago * hour_ms
+        rows.append({
+            "cache_id": str(uuid.uuid4()),
+            "temp": temp,
+            "humidity": humidity,
+            "pressure": pressure,
+            "wind_speed": wind,
+            "wind_direction": 180.0,
+            "precipitation_amount": precip,
+            "dew_point_c": dew_point,
+            "elevation": 1.0,
+            "dist_to_coast_km": 15.0,
+            "nwp_cape_f36_max": 4200.0,
+            "nwp_cin_f36_max": -0.5,
+            "nwp_pwat_f36_max": 65.0,
+            "nwp_srh03_f36_max": 350.0,
+            "nwp_li_f36_min": -9.5,
+            "nwp_lcl_f36_min": 300.0,
+            "latitude": 29.95,
+            "longitude": -90.07,
+            "is_forecast": False,
+            "recorded_at_ms": recorded_at_ms,
+            "recorded_at": _to_central(recorded_at_ms),
+        })
+    return rows
+
 
 class SeedWeatherHistoryRequest(BaseModel):
     """Seed request — device sends its current coordinates."""
@@ -990,15 +1113,17 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                 "Prefer": "return=representation,resolution=merge-duplicates",
             }
 
-            # Ensure the simulation sentinel snapshot exists (survives DELETE sweeps)
+            # Ensure the simulation sentinel snapshot exists and always carries
+            # the full Katrina weather history so it is visible in Supabase
+            # immediately — no need to run StormSimulationActivity first.
             await client.post(
-                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot",
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
                 json=[{
                     "weather_id": "00000000-0000-0000-0000-000000000000",
                     "device_id": None,
-                    "synced_at": None,
-                    "is_current": False,
-                    "weather_data": [],
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                    "is_current": True,
+                    "weather_data": _build_katrina_weather_data(),
                     "snapshot_type": "seed",
                 }],
                 headers=headers,
@@ -1123,6 +1248,49 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
         print(f"[SEED] \u2717 Exception: {e}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= SIMULATION SENTINEL =============
+
+class SentinelWeatherDataRequest(_BaseModel):
+    weather_data: list[dict]
+
+
+@app.put("/simulation/sentinel")
+async def update_simulation_sentinel(request: SentinelWeatherDataRequest):
+    """
+    Upsert the simulation sentinel snapshot (weather_id = all-zeros) with
+    the provided weather_data JSONB so the Katrina simulation rows are
+    visible in the backend / Supabase dashboard.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {
+                "apikey": SUPABASE_API_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation,resolution=merge-duplicates",
+            }
+            resp = await client.post(
+                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
+                json=[{
+                    "weather_id": "00000000-0000-0000-0000-000000000000",
+                    "device_id": None,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                    "is_current": True,
+                    "weather_data": request.weather_data,
+                    "snapshot_type": "seed",
+                }],
+                headers=headers,
+            )
+            if resp.status_code not in [200, 201]:
+                raise HTTPException(status_code=502, detail=f"Supabase error: {resp.text[:300]}")
+            logger.info("✓ Simulation sentinel updated with %d weather rows", len(request.weather_data))
+            return {"success": True, "rows": len(request.weather_data)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error updating simulation sentinel")
         raise HTTPException(status_code=500, detail=str(e))
 
 
