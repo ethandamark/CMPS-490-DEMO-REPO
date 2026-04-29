@@ -13,10 +13,14 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.CMPS490.weathertracker.network.BackendConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import android.os.Build
 import androidx.core.app.NotificationManagerCompat
@@ -171,4 +175,35 @@ class AuthenticationService(private val context: Context) {
 
     fun getStoredAnonUserId(): String? = prefs.getString(KEY_ANON_USER_ID, null)
     fun getStoredDeviceId(): String? = prefs.getString(KEY_DEVICE_ID, null)
+
+    /**
+     * Verify that the stored device ID still exists in the backend.
+     * Returns true if the device exists OR if the backend is unreachable (offline),
+     * so callers do not force re-registration when there is no network.
+     */
+    suspend fun verifyDeviceExists(deviceId: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(8, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .build()
+            val response = client.newCall(
+                Request.Builder()
+                    .url(BackendConfig.endpoint("/devices/$deviceId/exists"))
+                    .get()
+                    .build()
+            ).execute()
+            if (!response.isSuccessful) return@withContext true // assume valid on unexpected errors
+            JSONObject(response.body?.string() ?: "{}").optBoolean("exists", true)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not verify device existence (backend unreachable?) — keeping credentials: ${e.message}")
+            true // Treat as valid when offline to avoid unnecessary re-registration
+        }
+    }
+
+    /** Erase locally stored credentials so the next call to initializeFirstRun re-registers. */
+    fun clearCredentials() {
+        prefs.edit().remove(KEY_ANON_USER_ID).remove(KEY_DEVICE_ID).apply()
+        Log.d(TAG, "Credentials cleared from SharedPreferences")
+    }
 }

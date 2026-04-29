@@ -344,12 +344,22 @@ class MainActivity : ComponentActivity() {
                     val authService = AuthenticationService(context)
                     val existingDeviceId = authService.getStoredDeviceId()
                     
-                    // If we already have credentials, just restore them and mark complete
+                    // If we already have credentials, verify they are still valid in the
+                    // backend before restoring them.  After clear_db.py the Supabase tables
+                    // are wiped but SharedPreferences still holds old IDs — without this
+                    // check every subsequent backend call fails with an FK violation.
                     if (existingDeviceId != null) {
-                        Log.d("MainActivity", "✓ Existing credentials found: $existingDeviceId")
-                        storedDeviceId = existingDeviceId
-                        registrationComplete = true
-                        return@LaunchedEffect
+                        val stillValid = authService.verifyDeviceExists(existingDeviceId)
+                        if (stillValid) {
+                            Log.d("MainActivity", "✓ Existing credentials verified: $existingDeviceId")
+                            storedDeviceId = existingDeviceId
+                            registrationComplete = true
+                            return@LaunchedEffect
+                        } else {
+                            Log.w("MainActivity", "⚠ Stored device not found in backend — clearing stale credentials and re-registering")
+                            authService.clearCredentials()
+                            // Fall through to the registration flow below
+                        }
                     }
                     
                     // For new users, wait for location dialog to be answered
@@ -764,6 +774,19 @@ class MainActivity : ComponentActivity() {
                             forecastWeather = emptyList()
                         }
                     )
+                }
+
+                // Monitor backend health while connected — detect sudden disconnects
+                LaunchedEffect(backendConnected) {
+                    if (!backendConnected) return@LaunchedEffect
+                    while (true) {
+                        delay(15_000)
+                        if (!OpenMeteoFallback.checkBackendHealth()) {
+                            Log.d("MainActivity", "⚠ Backend connection lost (health check failed)")
+                            backendConnected = false
+                            break
+                        }
+                    }
                 }
 
                 // Fallback: fetch from Open-Meteo when backend is unavailable + retry every 10s
