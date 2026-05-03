@@ -2,14 +2,23 @@ package com.CMPS490.weathertracker
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,6 +29,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -34,6 +44,9 @@ import com.google.android.gms.maps.model.TileOverlay
 import com.google.android.gms.maps.model.TileOverlayOptions
 import com.google.android.gms.maps.model.UrlTileProvider
 import com.google.maps.android.compose.*
+import coil.compose.AsyncImage
+import coil.decode.SvgDecoder
+import coil.request.ImageRequest
 import kotlinx.coroutines.delay
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -45,6 +58,7 @@ private const val STORM_ALERT_THRESHOLD = 0.4901f
 private const val MAX_BAR_HEIGHT_DP = 48f
 private const val MIN_BAR_HEIGHT_DP = 4f
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun WeatherOverviewScreen(
     currentWeather: CurrentWeatherUiModel,
@@ -54,8 +68,9 @@ fun WeatherOverviewScreen(
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
     onLocationSelected: (LocationOptionUiModel) -> Unit,
-    canSaveCurrentLocation: Boolean,
-    onSaveCurrentLocation: () -> Unit,
+    isCurrentLocationSaved: Boolean,
+    canToggleCurrentLocationSaved: Boolean,
+    onToggleCurrentLocationSaved: () -> Unit,
     onLiveRadarClick: () -> Unit,
     stormRiskTimeline: List<Pair<Long, Float>> = emptyList(),
     backendConnected: Boolean = true,
@@ -71,16 +86,18 @@ fun WeatherOverviewScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 20.dp),
-            contentPadding = PaddingValues(top = 60.dp, bottom = 40.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
+            stickyHeader {
+                TempestStickyHeader()
+            }
+
             item {
                 LocationSelectorCard(
                     locationOptions = locationOptions,
                     selectedLocationOption = selectedLocationOption,
-                    onLocationSelected = onLocationSelected,
-                    canSaveCurrentLocation = canSaveCurrentLocation,
-                    onSaveCurrentLocation = onSaveCurrentLocation
+                    onLocationSelected = onLocationSelected
                 )
             }
 
@@ -94,6 +111,9 @@ fun WeatherOverviewScreen(
                 WeatherHeaderCard(
                     weather = currentWeather,
                     visualStyle = visualStyle,
+                    isCurrentLocationSaved = isCurrentLocationSaved,
+                    canToggleCurrentLocationSaved = canToggleCurrentLocationSaved,
+                    onToggleCurrentLocationSaved = onToggleCurrentLocationSaved
                 )
             }
 
@@ -134,6 +154,110 @@ fun WeatherOverviewScreen(
             if (stormRiskTimeline.isNotEmpty()) {
                 item {
                     StormRiskTimelineCard(stormRiskTimeline)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TempestStickyHeader() {
+    val palette = WeatherTrackerThemeState.palette
+    val context = LocalContext.current
+    val livePulse = rememberInfiniteTransition(label = "livePulse").animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "livePulseAlpha"
+    )
+
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        tonalElevation = 10.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 2.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, palette.primaryText.copy(alpha = 0.15f)),
+                color = Color.Transparent,
+                modifier = Modifier
+                    .fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(
+                                    palette.cardBackground.copy(alpha = 0.96f),
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                                    palette.cardBackground.copy(alpha = 0.96f)
+                                )
+                            )
+                        )
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(50.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data("file:///android_asset/vectorLogo (1).svg")
+                                .decoderFactory(SvgDecoder.Factory())
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "tempestAI logo",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "tempestAI",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = palette.primaryText,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "weather - anytime, anywhere",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = palette.mutedText
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(99.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = livePulse.value))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "LIVE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -279,9 +403,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
 fun LocationSelectorCard(
     locationOptions: List<LocationOptionUiModel>,
     selectedLocationOption: LocationOptionUiModel,
-    onLocationSelected: (LocationOptionUiModel) -> Unit,
-    canSaveCurrentLocation: Boolean,
-    onSaveCurrentLocation: () -> Unit
+    onLocationSelected: (LocationOptionUiModel) -> Unit
 ) {
     val palette = WeatherTrackerThemeState.palette
     val context = LocalContext.current
@@ -333,15 +455,7 @@ fun LocationSelectorCard(
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Location Source",
-                style = MaterialTheme.typography.labelMedium,
-                color = palette.mutedText,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-            Spacer(modifier = Modifier.height(10.dp))
+        Column(modifier = Modifier.padding(12.dp)) {
             Box {
                 OutlinedButton(
                     onClick = {
@@ -404,21 +518,6 @@ fun LocationSelectorCard(
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(16.dp))
-            OutlinedButton(
-                onClick = onSaveCurrentLocation,
-                enabled = canSaveCurrentLocation,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = palette.selectorBackground,
-                    contentColor = palette.selectorContent,
-                    disabledContainerColor = palette.selectorBackground.copy(alpha = 0.55f),
-                    disabledContentColor = palette.mutedText
-                ),
-                border = androidx.compose.foundation.BorderStroke(1.dp, palette.outline)
-            ) {
-                Text(if (canSaveCurrentLocation) "Save Current Location" else "Location Already Saved")
-            }
         }
     }
 }
@@ -427,6 +526,9 @@ fun LocationSelectorCard(
 fun WeatherHeaderCard(
     weather: CurrentWeatherUiModel,
     visualStyle: WeatherVisualStyle,
+    isCurrentLocationSaved: Boolean,
+    canToggleCurrentLocationSaved: Boolean,
+    onToggleCurrentLocationSaved: () -> Unit,
 ) {
     val palette = WeatherTrackerThemeState.palette
     Surface(
@@ -455,6 +557,7 @@ fun WeatherHeaderCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -469,7 +572,7 @@ fun WeatherHeaderCard(
                             modifier = Modifier.padding(12.dp)
                         )
                     }
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = weather.location,
                             style = MaterialTheme.typography.headlineSmall,
@@ -480,6 +583,20 @@ fun WeatherHeaderCard(
                             text = weather.dayDate,
                             style = MaterialTheme.typography.bodyMedium,
                             color = palette.mutedText
+                        )
+                    }
+                    IconButton(
+                        onClick = onToggleCurrentLocationSaved,
+                        enabled = canToggleCurrentLocationSaved,
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
+                    ) {
+                        Icon(
+                            imageVector = if (isCurrentLocationSaved) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                            contentDescription = if (isCurrentLocationSaved) "Location saved" else "Save location",
+                            tint = if (isCurrentLocationSaved) Color(0xFFFBC02D) else palette.primaryText
                         )
                     }
                 }
@@ -760,6 +877,7 @@ fun ForecastRow(day: DailyForecastUiModel) {
         Surface(
             color = if (day.isToday) palette.cardBackground else Color.Transparent,
             shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, palette.primaryText.copy(alpha = 0.18f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { expanded = !expanded }
@@ -787,7 +905,7 @@ fun ForecastRow(day: DailyForecastUiModel) {
                     Icon(
                         imageVector = getWeatherIcon(day.weatherType),
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = palette.primaryText,
                         modifier = Modifier.size(24.dp)
                     )
                     if (day.precipitationChance > 0) {
@@ -894,8 +1012,9 @@ fun PreviewWeatherOverview() {
             ),
             selectedLocationOption = LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
             onLocationSelected = {},
-            canSaveCurrentLocation = true,
-            onSaveCurrentLocation = {},
+            isCurrentLocationSaved = false,
+            canToggleCurrentLocationSaved = true,
+            onToggleCurrentLocationSaved = {},
             onLiveRadarClick = {}
         )
     }

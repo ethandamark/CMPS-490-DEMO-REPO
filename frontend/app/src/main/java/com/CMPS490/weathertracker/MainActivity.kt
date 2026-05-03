@@ -464,12 +464,6 @@ class MainActivity : ComponentActivity() {
                 val defaultLocationOptions = remember {
                     listOf(
                         LocationOptionUiModel("Use device location", null, null, true),
-                        LocationOptionUiModel("Baton Rouge, LA", 30.4515, -91.1871),
-                        LocationOptionUiModel("New Orleans, LA", 29.9511, -90.0715),
-                        LocationOptionUiModel("Lafayette, LA", 30.2241, -92.0198),
-                        LocationOptionUiModel("Shreveport, LA", 32.5252, -93.7502),
-                        LocationOptionUiModel("Lake Charles, LA", 30.2266, -93.2174),
-                        LocationOptionUiModel("Monroe, LA", 32.5093, -92.1193)
                     )
                 }
                 var savedLocationOptions by remember { mutableStateOf(loadSavedLocationOptions(prefs)) }
@@ -492,13 +486,14 @@ class MainActivity : ComponentActivity() {
                 }
                 val mapLocation = weatherQueryLocation ?: userLocation
                 val selectedLocationLabel = selectedLocationOption.label
-                val canSaveCurrentLocation = weatherQueryLocation != null &&
-                    savedLocationOptions.none { option ->
+                val isCurrentLocationSaved = weatherQueryLocation != null &&
+                    savedLocationOptions.any { option ->
                         option.latitude != null &&
                             option.longitude != null &&
                             coordinatesMatch(option.latitude, weatherQueryLocation.latitude) &&
                             coordinatesMatch(option.longitude, weatherQueryLocation.longitude)
                     }
+                val canToggleCurrentLocationSaved = weatherQueryLocation != null
 
                 var currentWeather by remember {
                     mutableStateOf(
@@ -827,22 +822,40 @@ class MainActivity : ComponentActivity() {
                             locationOptions = locationOptions,
                             selectedLocationOption = selectedLocationOption,
                             onLocationSelected = { selectedLocationOption = it },
-                            canSaveCurrentLocation = canSaveCurrentLocation,
-                            onSaveCurrentLocation = {
+                            isCurrentLocationSaved = isCurrentLocationSaved,
+                            canToggleCurrentLocationSaved = canToggleCurrentLocationSaved,
+                            onToggleCurrentLocationSaved = {
                                 val locationToSave = weatherQueryLocation ?: return@WeatherOverviewScreen
-                                val baseLabel = currentViewLabel.ifBlank {
-                                    "Saved ${locationToSave.latitude.formatCoordinate()}, ${locationToSave.longitude.formatCoordinate()}"
+                                val existingSaved = savedLocationOptions.firstOrNull { option ->
+                                    option.latitude != null &&
+                                        option.longitude != null &&
+                                        coordinatesMatch(option.latitude, locationToSave.latitude) &&
+                                        coordinatesMatch(option.longitude, locationToSave.longitude)
                                 }
-                                val uniqueLabel = makeUniqueLocationLabel(baseLabel, locationOptions)
-                                val savedOption = LocationOptionUiModel(
-                                    label = uniqueLabel,
-                                    latitude = locationToSave.latitude,
-                                    longitude = locationToSave.longitude,
-                                    useDeviceLocation = false
-                                )
-                                savedLocationOptions = savedLocationOptions + savedOption
-                                persistSavedLocationOptions(prefs, savedLocationOptions)
-                                selectedLocationOption = savedOption
+
+                                if (existingSaved != null) {
+                                    savedLocationOptions = savedLocationOptions.filterNot { option ->
+                                        option.latitude != null &&
+                                            option.longitude != null &&
+                                            coordinatesMatch(option.latitude, locationToSave.latitude) &&
+                                            coordinatesMatch(option.longitude, locationToSave.longitude)
+                                    }
+                                    persistSavedLocationOptions(prefs, savedLocationOptions)
+                                } else {
+                                    val baseLabel = currentViewLabel.ifBlank {
+                                        "Saved ${locationToSave.latitude.formatCoordinate()}, ${locationToSave.longitude.formatCoordinate()}"
+                                    }
+                                    val uniqueLabel = makeUniqueLocationLabel(baseLabel, locationOptions)
+                                    val savedOption = LocationOptionUiModel(
+                                        label = uniqueLabel,
+                                        latitude = locationToSave.latitude,
+                                        longitude = locationToSave.longitude,
+                                        useDeviceLocation = false
+                                    )
+                                    savedLocationOptions = savedLocationOptions + savedOption
+                                    persistSavedLocationOptions(prefs, savedLocationOptions)
+                                    selectedLocationOption = savedOption
+                                }
                             },
                             onLiveRadarClick = { navController.navigate("map_screen") },
                             stormRiskTimeline = stormRiskTimeline,
