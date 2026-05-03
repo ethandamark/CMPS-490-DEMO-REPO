@@ -239,8 +239,26 @@ class SnapshotSyncWorker(
                 fromTime = snapshotTimeMs + MILLIS_PER_HOUR,
             ).filter { it.recordedAt !in postPredObsTimes }
 
+            // Deduplicate by recordedAt — obsRows can contain two rows for the same
+            // hour when a seeded/backfilled entry and a storeWeatherSnapshot entry both
+            // exist in Room. Prefer obs over forecast; among obs, prefer higher precipitation
+            // (hourly historical data has more accurate precipitation totals than the
+            // instantaneous "current" reading stored by storeWeatherSnapshot).
+            val dedupedRows = (obsRows + postPredObs + forecastRows)
+                .groupBy { it.recordedAt }
+                .values
+                .map { group ->
+                    group.minWithOrNull(
+                        compareBy(
+                            { if (it.isForecast) 1 else 0 },
+                            { -(it.precipitationAmount ?: 0.0) },
+                        )
+                    )!!
+                }
+                .sortedBy { it.recordedAt }
+
             val weatherDataArray = JsonArray()
-            for (row in (obsRows + postPredObs + forecastRows)) {
+            for (row in dedupedRows) {
                 weatherDataArray.add(JsonObject().apply {
                     addProperty("cache_id", row.cacheId)
                     addProperty("temp", row.temp)

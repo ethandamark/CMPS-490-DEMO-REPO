@@ -62,6 +62,7 @@ class LocationTrackingService : Service() {
         private const val PREF_LAST_SNAPSHOT_LAT = "last_snapshot_lat"
         private const val PREF_LAST_SNAPSHOT_LON = "last_snapshot_lon"
         private const val PREF_HAS_SEEDED_HISTORY = "has_seeded_history"
+        private const val PREF_LAST_SYNC_HOUR_MS = "last_sync_hour_ms"
         
         // Update interval: 1 minute (in milliseconds) - for testing
         private const val LOCATION_UPDATE_INTERVAL = 1 * 60 * 1000L
@@ -173,7 +174,11 @@ class LocationTrackingService : Service() {
 
                     val locationChanged = hasLocationChanged(location.latitude, location.longitude)
                     val significantMove = hasMovedSignificantly(location.latitude, location.longitude)
-                    val hourElapsed = System.currentTimeMillis() - lastSnapshotTimeMs >= MILLIS_PER_HOUR
+                    // Wall-clock aligned: fire whenever the current hour bucket (e.g. 3:00:00)
+                    // is newer than the hour bucket stored at the last prediction run.
+                    // Install at 2:30 → first run immediately, next at 3:xx, then 4:xx, etc.
+                    val currentHourMs = (System.currentTimeMillis() / MILLIS_PER_HOUR) * MILLIS_PER_HOUR
+                    val hourElapsed = currentHourMs > lastSnapshotTimeMs
 
                     // Always update stored coordinates
                     lastLatitude = location.latitude
@@ -208,7 +213,8 @@ class LocationTrackingService : Service() {
                             storeWeatherSnapshot(deviceId, location.latitude, location.longitude, runPrediction = false)
                         }
                     } else if (!locationChanged) {
-                        Log.d(TAG, "   ⏸ Next prediction in ${(MILLIS_PER_HOUR - (System.currentTimeMillis() - lastSnapshotTimeMs)) / 60000} min")
+                        val nextHourMs = ((System.currentTimeMillis() / MILLIS_PER_HOUR) + 1) * MILLIS_PER_HOUR
+                        Log.d(TAG, "   ⏸ Next prediction in ${(nextHourMs - System.currentTimeMillis()) / 60000} min (at :00)")
                     }
                 } ?: Log.w(TAG, "   ⚠ lastLocation was null!")
                 Log.d(TAG, "")
@@ -401,7 +407,9 @@ class LocationTrackingService : Service() {
             // Claim the snapshot slot eagerly so that any location callbacks that fire
             // while this coroutine is awaiting network responses don't see hourElapsed=true
             // and launch duplicate predictions.
-            lastSnapshotTimeMs = nowMs
+            // Store the hour bucket (not exact time) so the wall-clock guard works correctly
+            // after a service restart.
+            lastSnapshotTimeMs = hourMs
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .putLong(PREF_LAST_SNAPSHOT_TIME, lastSnapshotTimeMs)
                 .apply()
@@ -564,55 +572,91 @@ class LocationTrackingService : Service() {
             } else {
                 Log.d(TAG, "📦 Snapshot stored (prediction skipped)")
             }
+
+            // Push snapshot + model instance to Supabase immediately rather than
+            // waiting up to 1 hour for the periodic WorkManager sync.
+            // Guard: only fire once per clock-hour to avoid redundant sync jobs.
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            val lastSyncHourMs = prefs.getLong(PREF_LAST_SYNC_HOUR_MS, 0L)
+            if (hourMs > lastSyncHourMs) {
+                prefs.edit().putLong(PREF_LAST_SYNC_HOUR_MS, hourMs).apply()
+                com.CMPS490.weathertracker.sync.SnapshotSyncManager.triggerImmediateSync(this)
+            } else {
+                Log.d(TAG, "⏭ Immediate sync skipped — already synced this hour")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error storing weather snapshot", e)
         }
     }
 
+    /**
+     * Fetch current weather, preferring the backend proxy (`GET /weather/current`)
+     * so all Open-Meteo traffic is routed through the backend.
+     * Falls back to a direct Open-Meteo call only when the backend is unreachable
+     * but the device still has network connectivity (e.g. backend is down but WiFi/LTE
+     * is available).
+     *
+     * The backend endpoint already resolves the hourly precipitation fallback, so the
+     * returned object is identical regardless of which path is used.
+     */
     private fun fetchOpenMeteoWeather(latitude: Double, longitude: Double): JSONObject? {
+        // ── Primary: backend proxy ────────────────────────────────────────────────
+        try {
+            val url = BackendConfig.endpoint("/weather/current") +
+                "?lat=$latitude&lon=$longitude"
+            val response = httpClient.newCall(Request.Builder().url(url).build()).execute()
+            if (response.isSuccessful) {
+                val body = response.body?.string()
+                if (!body.isNullOrBlank()) {
+                    val json = JSONObject(body)
+                    // Backend returns the current object directly (already has elevation +
+                    // resolved precipitation), so use it as-is.
+                    if (json.has("temperature_2m")) {
+                        Log.d(TAG, "✓ Weather via backend proxy")
+                        return json
+                    }
+                }
+            }
+            Log.d(TAG, "Backend weather proxy unavailable (${response.code}) — falling back to direct Open-Meteo")
+        } catch (e: Exception) {
+            Log.d(TAG, "Backend weather proxy unreachable (${e.message}) — falling back to direct Open-Meteo")
+        }
+
+        // ── Fallback: direct Open-Meteo (backend unreachable but network available) ──
         return try {
-            // Also request hourly precipitation so we can use the current-hour value as a
-            // fallback. Open-Meteo's current.precipitation is "sum of the preceding hour",
-            // so it reads 0 whenever rain started within the current clock hour.
             val url = "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$latitude&longitude=$longitude" +
                 "&timezone=UTC&wind_speed_unit=kmh" +
                 "&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,pressure_msl,wind_speed_10m,wind_direction_10m" +
                 "&hourly=precipitation" +
                 "&forecast_days=1"
-            val request = Request.Builder().url(url).build()
-            val response = httpClient.newCall(request).execute()
+            val response = httpClient.newCall(Request.Builder().url(url).build()).execute()
             if (!response.isSuccessful) return null
             val body = response.body?.string() ?: return null
             val json = JSONObject(body)
             val current = json.optJSONObject("current") ?: return null
-            val elevation = json.optDouble("elevation")
-            current.put("elevation", elevation)
+            current.put("elevation", json.optDouble("elevation"))
 
-            // If the preceding-hour aggregate is 0, check the current hour's hourly
-            // forecast value which captures ongoing rain within the current hour.
-            val currentPrecip = current.optDouble("precipitation", 0.0)
-            if (currentPrecip == 0.0) {
+            // Resolve current-hour precipitation fallback
+            if (current.optDouble("precipitation", 0.0) == 0.0) {
                 val hourly = json.optJSONObject("hourly")
                 val times = hourly?.optJSONArray("time")
                 val precips = hourly?.optJSONArray("precipitation")
                 if (times != null && precips != null) {
-                    val currentTime = current.optString("time") // "2024-01-15T14:00"
+                    val currentTime = current.optString("time")
                     for (i in 0 until times.length()) {
                         if (times.optString(i) == currentTime) {
                             val hourlyPrecip = precips.optDouble(i, 0.0)
-                            if (hourlyPrecip > 0.0) {
-                                current.put("precipitation", hourlyPrecip)
-                            }
+                            if (hourlyPrecip > 0.0) current.put("precipitation", hourlyPrecip)
                             break
                         }
                     }
                 }
             }
-
+            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
             current
         } catch (e: Exception) {
-            Log.w(TAG, "Open-Meteo fetch error: ${e.message}")
+            Log.w(TAG, "Open-Meteo direct fetch error: ${e.message}")
             null
         }
     }

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.CMPS490.weathertracker.data.ForecastFetcher
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.FeatureAssemblyService
@@ -19,7 +20,6 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
@@ -62,33 +62,42 @@ class DebugPredictReceiver : BroadcastReceiver() {
                 val db = WeatherDatabase.getInstance(context)
                 val nowMs = System.currentTimeMillis()
                 val hourMs = (nowMs / 3_600_000L) * 3_600_000L
+                val cacheId = ForecastFetcher.deterministicCacheId(lat, lon, hourMs, false)
 
-                val cacheEntity = WeatherCacheEntity(
-                    cacheId = UUID.randomUUID().toString(),
-                    temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
-                    humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
-                    windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
-                    windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
-                    precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
-                    pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
-                    recordedAt = hourMs,
-                    latitude = lat,
-                    longitude = lon,
-                    isForecast = false,
-                    dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
-                    elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
-                    distToCoastKm = null,
-                    nwpCapeF36Max = null,
-                    nwpCinF36Max = null,
-                    nwpPwatF36Max = null,
-                    nwpSrh03F36Max = null,
-                    nwpLiF36Min = null,
-                    nwpLclF36Min = null,
-                    nwpAvailableLeads = null,
-                    mrmsMaxDbz75km = null,
-                )
-                db.weatherCacheDao().upsert(cacheEntity)
-                Log.d(TAG, "✓ Weather cached (temp=${cacheEntity.temp}, hum=${cacheEntity.humidity}, press=${cacheEntity.pressure})")
+                // Only upsert if the row doesn't already exist — same guard as DebugPredictActivity.
+                // INSERT OR REPLACE deletes the old row first, which cascades to offline_weather_snapshot
+                // and breaks the hourly prediction sync chain.
+                val existingRow = db.weatherCacheDao().getByIds(listOf(cacheId)).firstOrNull()
+                if (existingRow == null) {
+                    val cacheEntity = WeatherCacheEntity(
+                        cacheId = cacheId,
+                        temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
+                        humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
+                        windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
+                        windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
+                        precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
+                        pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
+                        recordedAt = hourMs,
+                        latitude = lat,
+                        longitude = lon,
+                        isForecast = false,
+                        dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
+                        elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
+                        distToCoastKm = null,
+                        nwpCapeF36Max = null,
+                        nwpCinF36Max = null,
+                        nwpPwatF36Max = null,
+                        nwpSrh03F36Max = null,
+                        nwpLiF36Min = null,
+                        nwpLclF36Min = null,
+                        nwpAvailableLeads = null,
+                        mrmsMaxDbz75km = null,
+                    )
+                    db.weatherCacheDao().upsert(cacheEntity)
+                    Log.d(TAG, "✓ Weather cached (temp=${cacheEntity.temp}, hum=${cacheEntity.humidity}, press=${cacheEntity.pressure})")
+                } else {
+                    Log.d(TAG, "✓ Weather already cached for this hour (preserving hourly loop snapshot)")
+                }
 
                 val features = FeatureAssemblyService(db).assembleFeatures(lat, lon)
                 if (features.isEmpty()) {
@@ -115,19 +124,57 @@ class DebugPredictReceiver : BroadcastReceiver() {
     }
 
     private fun fetchOpenMeteoWeather(latitude: Double, longitude: Double): JSONObject? {
+        // Primary: route through backend proxy
+        try {
+            val url = com.CMPS490.weathertracker.network.BackendConfig.endpoint("/weather/current") +
+                "?lat=$latitude&lon=$longitude"
+            val response = httpClient.newCall(Request.Builder().url(url).build()).execute()
+            if (response.isSuccessful) {
+                val body = response.body?.string()
+                if (!body.isNullOrBlank()) {
+                    val json = JSONObject(body)
+                    if (json.has("temperature_2m")) {
+                        Log.d(TAG, "✓ Weather via backend proxy")
+                        return json
+                    }
+                }
+            }
+            Log.d(TAG, "Backend weather proxy unavailable (${response.code}) — falling back to direct Open-Meteo")
+        } catch (e: Exception) {
+            Log.d(TAG, "Backend weather proxy unreachable (${e.message}) — falling back to direct Open-Meteo")
+        }
+
+        // Fallback: direct Open-Meteo
         return try {
             val url = "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$latitude&longitude=$longitude" +
                 "&timezone=UTC&wind_speed_unit=kmh" +
-                "&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,pressure_msl,wind_speed_10m" +
+                "&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,pressure_msl,wind_speed_10m,wind_direction_10m" +
+                "&hourly=precipitation" +
                 "&forecast_days=1"
-            val request = Request.Builder().url(url).build()
-            val response = httpClient.newCall(request).execute()
+            val response = httpClient.newCall(Request.Builder().url(url).build()).execute()
             if (!response.isSuccessful) return null
             val body = response.body?.string() ?: return null
             val json = JSONObject(body)
             val current = json.optJSONObject("current") ?: return null
             current.put("elevation", json.optDouble("elevation"))
+
+            if (current.optDouble("precipitation", 0.0) == 0.0) {
+                val hourly = json.optJSONObject("hourly")
+                val times = hourly?.optJSONArray("time")
+                val precips = hourly?.optJSONArray("precipitation")
+                if (times != null && precips != null) {
+                    val currentTime = current.optString("time")
+                    for (i in 0 until times.length()) {
+                        if (times.optString(i) == currentTime) {
+                            val hourlyPrecip = precips.optDouble(i, 0.0)
+                            if (hourlyPrecip > 0.0) current.put("precipitation", hourlyPrecip)
+                            break
+                        }
+                    }
+                }
+            }
+            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo error: ${e.message}")

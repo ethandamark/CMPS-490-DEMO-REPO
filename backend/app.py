@@ -212,6 +212,54 @@ async def health_check():
 
 # ============= WEATHER API PROXY =============
 
+@app.get("/weather/current")
+async def get_current_weather(lat: float, lon: float):
+    """
+    Proxy: Fetch current weather observation + current-hour hourly precipitation
+    from Open-Meteo so the device doesn't need a direct internet route to
+    api.open-meteo.com.  Returns the same JSON shape as Open-Meteo's
+    `current` object, with `elevation` and `precipitation` already resolved
+    (current-hour hourly value is used when the preceding-hour aggregate is 0).
+    """
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            f"&timezone=UTC&wind_speed_unit=kmh"
+            f"&current=temperature_2m,relative_humidity_2m,dew_point_2m,"
+            f"precipitation,pressure_msl,wind_speed_10m,wind_direction_10m"
+            f"&hourly=precipitation"
+            f"&forecast_days=1"
+        )
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Open-Meteo error: {resp.text[:200]}")
+
+        data = resp.json()
+        current = data.get("current", {})
+        elevation = data.get("elevation")
+        current["elevation"] = elevation
+
+        # Resolve current-hour precipitation fallback (same logic as the device)
+        if current.get("precipitation", 0.0) == 0.0:
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            precips = hourly.get("precipitation", [])
+            current_time = current.get("time", "")
+            for i, t in enumerate(times):
+                if t == current_time and i < len(precips) and precips[i]:
+                    if precips[i] > 0.0:
+                        current["precipitation"] = precips[i]
+                    break
+
+        return current
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Current weather error: {str(e)}")
+
+
 @app.get("/weather/points/{lat}/{lon}")
 async def get_weather_points(lat: float, lon: float):
     """

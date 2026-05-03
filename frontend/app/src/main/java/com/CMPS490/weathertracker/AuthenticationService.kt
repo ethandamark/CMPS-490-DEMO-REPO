@@ -204,6 +204,15 @@ class AuthenticationService(private val context: Context) {
     /** Erase locally stored credentials so the next call to initializeFirstRun re-registers. */
     fun clearCredentials() {
         prefs.edit().remove(KEY_ANON_USER_ID).remove(KEY_DEVICE_ID).apply()
-        Log.d(TAG, "Credentials cleared from SharedPreferences")
+        // Also reset the location-service seeded-history flag so the new device
+        // registration triggers a fresh seed rather than skipping it because a
+        // previous (now-deleted) device already seeded on this emulator.
+        context.getSharedPreferences("location_tracking_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .remove("has_seeded_history")
+            .remove("last_snapshot_time_ms")
+            .remove("last_sync_hour_ms")
+            .apply()
+        Log.d(TAG, "Credentials and location tracking state cleared from SharedPreferences")
     }
 }

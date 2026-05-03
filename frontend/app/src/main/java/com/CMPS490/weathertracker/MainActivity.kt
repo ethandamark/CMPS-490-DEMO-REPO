@@ -803,9 +803,9 @@ class MainActivity : ComponentActivity() {
                         forecastWeather = fallback.forecast
                     }
 
-                    // Retry backend connection every 10 seconds
+                    // Retry backend connection every 3 seconds
                     while (true) {
-                        delay(10_000)
+                        delay(3_000)
                         if (OpenMeteoFallback.checkBackendHealth()) {
                             Log.d("MainActivity", "✓ Backend connection restored")
                             backendConnected = true
@@ -813,7 +813,7 @@ class MainActivity : ComponentActivity() {
                             retryTrigger++
                             break
                         }
-                        Log.d("MainActivity", "⏳ Backend still unreachable, retrying in 10s...")
+                        Log.d("MainActivity", "⏳ Backend still unreachable, retrying in 3s...")
                     }
                 }
 
