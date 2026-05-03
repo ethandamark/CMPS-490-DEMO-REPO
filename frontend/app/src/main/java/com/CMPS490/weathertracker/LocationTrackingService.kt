@@ -482,13 +482,13 @@ class LocationTrackingService : Service() {
                 dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
                 elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
                 distToCoastKm = null,
-                nwpCapeF36Max = null,
-                nwpCinF36Max = null,
-                nwpPwatF36Max = null,
-                nwpSrh03F36Max = null,
-                nwpLiF36Min = null,
-                nwpLclF36Min = null,
-                nwpAvailableLeads = null,
+                nwpCapeF36Max = weatherData.optNullableDouble("nwp_cape_f3_6_max", "nwp_cape_f36_max"),
+                nwpCinF36Max = weatherData.optNullableDouble("nwp_cin_f3_6_max", "nwp_cin_f36_max"),
+                nwpPwatF36Max = weatherData.optNullableDouble("nwp_pwat_f3_6_max", "nwp_pwat_f36_max"),
+                nwpSrh03F36Max = weatherData.optNullableDouble("nwp_srh03_f3_6_max", "nwp_srh03_f36_max"),
+                nwpLiF36Min = weatherData.optNullableDouble("nwp_li_f3_6_min", "nwp_li_f36_min"),
+                nwpLclF36Min = weatherData.optNullableDouble("nwp_lcl_f3_6_min", "nwp_lcl_f36_min"),
+                nwpAvailableLeads = weatherData.optNullableDouble("nwp_available_leads", "nwp_available"),
                 mrmsMaxDbz75km = null,
             )
 
@@ -885,13 +885,13 @@ class LocationTrackingService : Service() {
                         dewPointC = row.optDouble("dew_point_c").takeUnless { it.isNaN() },
                         elevation = row.optDouble("elevation").takeUnless { it.isNaN() },
                         distToCoastKm = null,
-                        nwpCapeF36Max = null,
-                        nwpCinF36Max = null,
-                        nwpPwatF36Max = null,
-                        nwpSrh03F36Max = null,
-                        nwpLiF36Min = null,
-                        nwpLclF36Min = null,
-                        nwpAvailableLeads = null,
+                        nwpCapeF36Max = row.optNullableDouble("nwp_cape_f3_6_max", "nwp_cape_f36_max"),
+                        nwpCinF36Max = row.optNullableDouble("nwp_cin_f3_6_max", "nwp_cin_f36_max"),
+                        nwpPwatF36Max = row.optNullableDouble("nwp_pwat_f3_6_max", "nwp_pwat_f36_max"),
+                        nwpSrh03F36Max = row.optNullableDouble("nwp_srh03_f3_6_max", "nwp_srh03_f36_max"),
+                        nwpLiF36Min = row.optNullableDouble("nwp_li_f3_6_min", "nwp_li_f36_min"),
+                        nwpLclF36Min = row.optNullableDouble("nwp_lcl_f3_6_min", "nwp_lcl_f36_min"),
+                        nwpAvailableLeads = row.optNullableDouble("nwp_available_leads", "nwp_available"),
                         mrmsMaxDbz75km = null,
                     )
                 )
@@ -1002,4 +1002,13 @@ class LocationTrackingService : Service() {
 
         nm.notify(2001, notification)
     }
+}
+
+private fun JSONObject.optNullableDouble(vararg names: String): Double? {
+    for (name in names) {
+        if (!has(name) || isNull(name)) continue
+        val value = optDouble(name)
+        if (!value.isNaN()) return value
+    }
+    return null
 }

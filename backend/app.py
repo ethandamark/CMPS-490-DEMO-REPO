@@ -25,7 +25,7 @@ import string
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import logging
-from math import radians, cos, sin, sqrt, atan2
+from math import radians, cos, sin, sqrt, atan2, isfinite
 
 _CENTRAL = ZoneInfo("America/Chicago")
 
@@ -47,6 +47,59 @@ def _to_central(ts) -> str:
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+NWP_HOURLY_VARS = (
+    "cape",
+    "convective_inhibition",
+    "precipitable_water",
+    "storm_relative_helicity_0_to_3km",
+    "lifted_index",
+    "cloud_base",
+)
+
+
+def _finite_values(values) -> list[float]:
+    result = []
+    for value in values or []:
+        if isinstance(value, (int, float)) and isfinite(value):
+            result.append(float(value))
+    return result
+
+
+def _add_nwp_aggregates(current: dict, hourly: dict) -> None:
+    """
+    Add 3-6 hour NWP passthrough features used by the bundled Android model.
+
+    Open-Meteo exposes the raw hourly values; the model expects compact
+    aggregates over the near-term forecast window. Missing variables are left
+    absent/null instead of failing the current-weather response.
+    """
+    times = hourly.get("time") or []
+    current_time = current.get("time")
+    current_index = times.index(current_time) if current_time in times else 0
+    start = min(current_index + 3, len(times))
+    end = min(current_index + 7, len(times))
+    window = slice(start, end)
+
+    def values(name: str) -> list[float]:
+        return _finite_values((hourly.get(name) or [])[window])
+
+    cape = values("cape")
+    cin = values("convective_inhibition")
+    pwat = values("precipitable_water")
+    srh03 = values("storm_relative_helicity_0_to_3km")
+    li = values("lifted_index")
+    lcl = values("cloud_base")
+    lead_counts = [len(cape), len(cin), len(pwat), len(srh03), len(li), len(lcl)]
+
+    current["nwp_cape_f3_6_max"] = max(cape) if cape else None
+    current["nwp_cin_f3_6_max"] = max(cin) if cin else None
+    current["nwp_pwat_f3_6_max"] = max(pwat) if pwat else None
+    current["nwp_srh03_f3_6_max"] = max(srh03) if srh03 else None
+    current["nwp_li_f3_6_min"] = min(li) if li else None
+    current["nwp_lcl_f3_6_min"] = min(lcl) if lcl else None
+    current["nwp_available_leads"] = float(min(lead_counts)) if any(lead_counts) else 0.0
 
 
 def deterministic_location_id(device_id: str) -> str:
@@ -252,6 +305,28 @@ async def get_current_weather(lat: float, lon: float):
                     if precips[i] > 0.0:
                         current["precipitation"] = precips[i]
                     break
+
+        # NWP passthrough features for the on-device model. Keep this as a
+        # best-effort second request so regular weather still works if one of
+        # these model variables is unavailable for a point/model run.
+        try:
+            nwp_url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={lat}&longitude={lon}"
+                f"&timezone=UTC"
+                f"&hourly={','.join(NWP_HOURLY_VARS)}"
+                f"&forecast_days=1"
+            )
+            async with httpx.AsyncClient(timeout=15) as client:
+                nwp_resp = await client.get(nwp_url)
+            if nwp_resp.status_code == 200:
+                _add_nwp_aggregates(current, nwp_resp.json().get("hourly", {}))
+            else:
+                logger.warning("NWP fetch failed for current weather: %s", nwp_resp.text[:200])
+                current["nwp_available_leads"] = 0.0
+        except Exception as nwp_error:
+            logger.warning("NWP fetch unavailable for current weather: %s", nwp_error)
+            current["nwp_available_leads"] = 0.0
 
         return current
     except HTTPException:
