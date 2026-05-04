@@ -8,7 +8,9 @@ import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
 import com.CMPS490.weathertracker.ml.PredictionResult
+import com.CMPS490.weathertracker.data.ModelInstanceEntity
 import com.CMPS490.weathertracker.network.BackendRetrofitInstance
+import com.CMPS490.weathertracker.sync.ModelInstanceSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -100,7 +102,7 @@ class LightSimulationActivity : ComponentActivity() {
      * - Steady precip 1.0 mm/h throughout
      * - CAPE=600, LI=-2.5, PWAT=30 (moderate pre-frontal moisture)
      *
-     * Calibrated against deployed ONNX model: ~25.5 dBZ [light], tier 1, no notification.
+     * Calibrated against deployed ONNX model: ~20-25 dBZ [light], tier 1, no notification.
      */
     private fun buildLightSnapshots(): List<WeatherCacheEntity> {
         val now = System.currentTimeMillis()
@@ -160,14 +162,14 @@ class LightSimulationActivity : ComponentActivity() {
                 dewPointC = h.dewPoint,
                 elevation = 12.0,
                 distToCoastKm = 155.0,
-                nwpCapeF36Max = 600.0,        // moderate instability
-                nwpCinF36Max = -20.0,         // weak cap
-                nwpPwatF36Max = 30.0,         // moderate moisture
-                nwpSrh03F36Max = 80.0,        // low-moderate helicity
-                nwpLiF36Min = -2.5,           // mildly negative LI
+                nwpCapeF36Max = 400.0,        // weak-moderate instability
+                nwpCinF36Max = -35.0,         // moderate cap
+                nwpPwatF36Max = 28.0,         // low-moderate moisture
+                nwpSrh03F36Max = 50.0,        // low helicity
+                nwpLiF36Min = -1.5,           // slightly negative LI
                 nwpLclF36Min = 800.0,         // low LCL (humid)
                 nwpAvailableLeads = 4.0,
-                mrmsMaxDbz75km = 25.0,        // light stratiform radar returns
+                mrmsMaxDbz75km = 22.0,        // light stratiform radar returns
             )
         }
     }
@@ -214,27 +216,29 @@ class LightSimulationActivity : ComponentActivity() {
         }
     }
 
-    private fun sendModelInstance(result: PredictionResult) {
+    private suspend fun sendModelInstance(result: PredictionResult) {
         try {
             val authService = AuthenticationService(this)
             val deviceId = authService.getStoredDeviceId() ?: "light-sim"
             val resultType = OnDevicePredictor.tierToName(result.alertState)
-            val body = com.google.gson.JsonObject().apply {
-                addProperty("version", "v1.0.0")
-                addProperty("latitude", LAT)
-                addProperty("longitude", LON)
-                addProperty("result_level", result.alertState)
-                addProperty("result_type", resultType)
-                addProperty("confidence_score", result.stormProbability.toDouble())
-                addProperty("predicted_dbz", result.predictedDbz.toDouble())
-                addProperty("weather_id", SIMULATION_SNAPSHOT_ID)
-            }
-            val response = BackendRetrofitInstance.api.createModelInstance(deviceId, body).execute()
-            if (response.isSuccessful) {
-                Log.d(TAG, "✓ model_instance recorded (tier=$resultType)")
-            } else {
-                Log.w(TAG, "✗ model_instance failed: ${response.code()}")
-            }
+            val db = WeatherDatabase.getInstance(this)
+            db.modelInstanceDao().upsert(
+                ModelInstanceEntity(
+                    instanceId = UUID.randomUUID().toString(),
+                    deviceId = deviceId,
+                    version = "v1.0.0",
+                    latitude = LAT,
+                    longitude = LON,
+                    resultLevel = result.alertState,
+                    resultType = resultType,
+                    confidenceScore = result.stormProbability,
+                    createdAt = System.currentTimeMillis(),
+                    weatherId = SIMULATION_SNAPSHOT_ID,
+                    predictedDbz = result.predictedDbz,
+                )
+            )
+            Log.d(TAG, "✓ model_instance stored locally (tier=$resultType)")
+            ModelInstanceSyncManager.triggerImmediateSync(this)
         } catch (e: Exception) {
             Log.w(TAG, "✗ model_instance error: ${e.message}")
         }

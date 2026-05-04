@@ -16,6 +16,10 @@ interface ModelInstanceDao {
         "WHERE mi.synced_at IS NULL " +
         "AND (" +
         "  mi.weather_id IS NULL " +
+        "  OR NOT EXISTS (" +
+        "    SELECT 1 FROM offline_weather_snapshot s " +
+        "    WHERE s.weather_id = mi.weather_id" +
+        "  ) " +
         "  OR EXISTS (" +
         "    SELECT 1 FROM offline_weather_snapshot s " +
         "    WHERE s.weather_id = mi.weather_id AND s.synced_at IS NOT NULL" +
