@@ -112,35 +112,41 @@ app = FastAPI(title="Weather Tracker API", version="1.0.0")
 @app.on_event("startup")
 async def _seed_simulation_sentinel():
     """
-    Upsert the simulation sentinel row on every backend startup so the
-    Katrina weather history is always visible in Supabase — regardless of
-    whether any device has triggered a seed.
+    Upsert one sentinel snapshot row per simulation tier on every backend
+    startup so each scenario's weather history is always visible in Supabase.
     """
+    simulations = [
+        ("00000000-0000-0000-0000-000000000000", "clear",    _build_clear_weather_data()),
+        ("10000000-0000-0000-0000-000000000000", "light",    _build_light_weather_data()),
+        ("20000000-0000-0000-0000-000000000000", "moderate", _build_moderate_weather_data()),
+        ("30000000-0000-0000-0000-000000000000", "storm",    _build_katrina_weather_data()),
+    ]
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
-                json=[{
-                    "weather_id": "00000000-0000-0000-0000-000000000000",
-                    "device_id": None,
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                    "is_current": True,
-                    "weather_data": _build_katrina_weather_data(),
-                    "snapshot_type": "seed",
-                }],
-                headers={
-                    "apikey": SUPABASE_API_KEY,
-                    "Content-Type": "application/json",
-                    "Prefer": "return=representation,resolution=merge-duplicates",
-                },
-            )
-            if resp.status_code in [200, 201]:
-                logger.info("✓ Simulation sentinel seeded on startup (%d Katrina rows)", 24)
-            else:
-                logger.warning("⚠ Simulation sentinel seed failed on startup: %s %s",
-                               resp.status_code, resp.text[:200])
+            for weather_id, label, weather_data in simulations:
+                resp = await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
+                    json=[{
+                        "weather_id": weather_id,
+                        "device_id": None,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                        "is_current": True,
+                        "weather_data": weather_data,
+                        "snapshot_type": "seed",
+                    }],
+                    headers={
+                        "apikey": SUPABASE_API_KEY,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=representation,resolution=merge-duplicates",
+                    },
+                )
+                if resp.status_code in [200, 201]:
+                    logger.info("✓ Simulation sentinel seeded: %s (%s)", label, weather_id[:8])
+                else:
+                    logger.warning("⚠ Sentinel seed failed for %s: %s %s",
+                                   label, resp.status_code, resp.text[:200])
     except Exception as e:
-        logger.warning("⚠ Could not seed simulation sentinel on startup: %s", e)
+        logger.warning("⚠ Could not seed simulation sentinels on startup: %s", e)
 
 # Enable CORS
 app.add_middleware(
@@ -199,18 +205,6 @@ def empty_alerts_response() -> dict:
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str
-
-
-class PredictionRequest(BaseModel):
-    """Prediction request model"""
-    # TODO: Update with your model's required input fields
-    pass
-
-
-class PredictionResponse(BaseModel):
-    """Prediction response model"""
-    # TODO: Update with your model's output fields
-    prediction: str = "ML model not yet integrated"
 
 
 class RegisterRequest(BaseModel):
@@ -1085,6 +1079,204 @@ async def get_device_snapshots(device_id: str, since: str | None = None):
 
 # ============= WEATHER HISTORY SEED =============
 
+def _build_clear_weather_data() -> list[dict]:
+    """
+    Returns 24 hourly rows of clear, dry high-pressure conditions (Lafayette, LA)
+    matching the data used by ClearSimulationActivity.
+    """
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    hour_ms = 3_600_000
+
+    hourly = [
+        # (hours_ago, temp_c, humidity, pressure_hpa, wind_kmh, precip_mm, dew_point_c)
+        (23, 14.0, 42.0, 1022.0,  6.0, 0.0,  2.0),
+        (22, 13.5, 41.0, 1022.5,  5.5, 0.0,  1.5),
+        (21, 13.0, 40.0, 1023.0,  5.0, 0.0,  1.0),
+        (20, 12.5, 39.0, 1023.0,  5.0, 0.0,  0.5),
+        (19, 12.0, 38.0, 1023.5,  5.0, 0.0,  0.0),
+        (18, 11.5, 37.0, 1024.0,  5.0, 0.0, -0.5),
+        (17, 11.0, 36.0, 1024.0,  5.5, 0.0, -1.0),
+        (16, 11.5, 36.0, 1024.5,  6.0, 0.0, -1.0),
+        (15, 13.0, 37.0, 1025.0,  6.5, 0.0, -0.5),
+        (14, 15.5, 38.0, 1025.0,  7.0, 0.0,  0.5),
+        (13, 18.0, 39.0, 1024.5,  8.0, 0.0,  2.0),
+        (12, 20.0, 40.0, 1024.0,  9.0, 0.0,  4.0),
+        (11, 21.5, 41.0, 1023.5,  9.5, 0.0,  5.5),
+        (10, 22.5, 42.0, 1023.0, 10.0, 0.0,  6.5),
+        ( 9, 23.0, 42.0, 1023.0, 10.0, 0.0,  7.0),
+        ( 8, 23.0, 43.0, 1022.5, 10.0, 0.0,  7.5),
+        ( 7, 22.5, 43.0, 1022.5,  9.5, 0.0,  7.0),
+        ( 6, 21.5, 42.0, 1023.0,  9.0, 0.0,  6.0),
+        ( 5, 20.0, 41.0, 1023.0,  8.0, 0.0,  4.5),
+        ( 4, 18.0, 40.0, 1023.5,  7.0, 0.0,  2.5),
+        ( 3, 16.5, 39.0, 1024.0,  6.5, 0.0,  1.0),
+        ( 2, 15.5, 38.0, 1024.0,  6.0, 0.0,  0.0),
+        ( 1, 14.5, 38.0, 1024.5,  5.5, 0.0, -0.5),
+        ( 0, 14.0, 38.0, 1024.5,  5.5, 0.0, -0.5),
+    ]
+
+    rows = []
+    for hours_ago, temp, humidity, pressure, wind, precip, dew_point in hourly:
+        recorded_at_ms = now_ms - hours_ago * hour_ms
+        rows.append({
+            "cache_id": str(uuid.uuid4()),
+            "temp": temp,
+            "humidity": humidity,
+            "pressure": pressure,
+            "wind_speed": wind,
+            "wind_direction": 330.0,
+            "precipitation_amount": precip,
+            "dew_point_c": dew_point,
+            "elevation": 12.0,
+            "dist_to_coast_km": 155.0,
+            "nwp_cape_f36_max": 20.0,
+            "nwp_cin_f36_max": -180.0,
+            "nwp_pwat_f36_max": 12.0,
+            "nwp_srh03_f36_max": 15.0,
+            "nwp_li_f36_min": 4.5,
+            "nwp_lcl_f36_min": 2000.0,
+            "latitude": 30.22,
+            "longitude": -92.02,
+            "is_forecast": False,
+            "recorded_at_ms": recorded_at_ms,
+            "recorded_at": _to_central(recorded_at_ms),
+        })
+    return rows
+
+
+def _build_light_weather_data() -> list[dict]:
+    """
+    Returns 24 hourly rows of a weak approaching front (Lafayette, LA)
+    matching the data used by LightSimulationActivity. Target ~25 dBZ.
+    """
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    hour_ms = 3_600_000
+
+    hourly = [
+        # (hours_ago, temp_c, humidity, pressure_hpa, wind_kmh, precip_mm, dew_point_c)
+        (23, 21.0, 72.0, 1005.0, 15.0, 1.0, 14.5),
+        (22, 21.0, 72.0, 1004.9, 15.2, 1.0, 14.5),
+        (21, 21.0, 72.0, 1004.7, 15.4, 1.0, 14.5),
+        (20, 21.0, 72.0, 1004.6, 15.7, 1.0, 14.5),
+        (19, 21.0, 72.0, 1004.5, 15.9, 1.0, 14.5),
+        (18, 21.0, 72.0, 1004.3, 16.1, 1.0, 14.5),
+        (17, 21.0, 72.0, 1004.2, 16.3, 1.0, 14.5),
+        (16, 21.0, 72.0, 1004.1, 16.5, 1.0, 14.5),
+        (15, 21.0, 72.0, 1004.0, 16.7, 1.0, 14.5),
+        (14, 21.0, 72.0, 1003.8, 17.0, 1.0, 14.5),
+        (13, 21.0, 72.0, 1003.7, 17.2, 1.0, 14.5),
+        (12, 21.0, 72.0, 1003.6, 17.4, 1.0, 14.5),
+        (11, 21.0, 72.0, 1003.4, 17.6, 1.0, 14.5),
+        (10, 21.0, 72.0, 1003.3, 17.8, 1.0, 14.5),
+        ( 9, 21.0, 72.0, 1003.2, 18.0, 1.0, 14.5),
+        ( 8, 21.0, 72.0, 1003.0, 18.3, 1.0, 14.5),
+        ( 7, 21.0, 72.0, 1002.9, 18.5, 1.0, 14.5),
+        ( 6, 21.0, 72.0, 1002.8, 18.7, 1.0, 14.5),
+        ( 5, 21.0, 72.0, 1002.7, 18.9, 1.0, 14.5),
+        ( 4, 21.0, 72.0, 1002.5, 19.1, 1.0, 14.5),
+        ( 3, 21.0, 72.0, 1002.4, 19.3, 1.0, 14.5),
+        ( 2, 21.0, 72.0, 1002.3, 19.6, 1.0, 14.5),
+        ( 1, 21.0, 72.0, 1002.1, 19.8, 1.0, 14.5),
+        ( 0, 21.0, 72.0, 1002.0, 20.0, 1.0, 14.5),
+    ]
+
+    rows = []
+    for hours_ago, temp, humidity, pressure, wind, precip, dew_point in hourly:
+        recorded_at_ms = now_ms - hours_ago * hour_ms
+        rows.append({
+            "cache_id": str(uuid.uuid4()),
+            "temp": temp,
+            "humidity": humidity,
+            "pressure": pressure,
+            "wind_speed": wind,
+            "wind_direction": 195.0,
+            "precipitation_amount": precip,
+            "dew_point_c": dew_point,
+            "elevation": 12.0,
+            "dist_to_coast_km": 155.0,
+            "nwp_cape_f36_max": 600.0,
+            "nwp_cin_f36_max": -20.0,
+            "nwp_pwat_f36_max": 30.0,
+            "nwp_srh03_f36_max": 80.0,
+            "nwp_li_f36_min": -2.5,
+            "nwp_lcl_f36_min": 800.0,
+            "latitude": 30.22,
+            "longitude": -92.02,
+            "is_forecast": False,
+            "recorded_at_ms": recorded_at_ms,
+            "recorded_at": _to_central(recorded_at_ms),
+        })
+    return rows
+
+
+def _build_moderate_weather_data() -> list[dict]:
+    """
+    Returns 24 hourly rows of an approaching MCS (Lafayette, LA)
+    matching the data used by ModerateSimulationActivity. Target ~35 dBZ.
+    """
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    hour_ms = 3_600_000
+
+    hourly = [
+        # (hours_ago, temp_c, humidity, pressure_hpa, wind_kmh, precip_mm, dew_point_c)
+        (23, 24.0, 83.0, 1006.0, 28.0, 1.3, 20.9),
+        (22, 24.0, 83.0, 1005.7, 28.3, 1.3, 20.9),
+        (21, 24.0, 83.0, 1005.3, 28.6, 1.3, 20.9),
+        (20, 24.0, 83.0, 1005.0, 28.9, 1.3, 20.9),
+        (19, 24.0, 83.0, 1004.6, 29.2, 1.3, 20.9),
+        (18, 24.0, 83.0, 1004.3, 29.5, 1.3, 20.9),
+        (17, 24.0, 83.0, 1003.9, 29.8, 1.3, 20.9),
+        (16, 24.0, 83.0, 1003.6, 30.1, 1.3, 20.9),
+        (15, 24.0, 83.0, 1003.2, 30.4, 1.3, 20.9),
+        (14, 24.0, 83.0, 1002.9, 30.7, 1.3, 20.9),
+        (13, 24.0, 83.0, 1002.5, 31.0, 1.3, 20.9),
+        (12, 24.0, 83.0, 1002.2, 31.3, 1.3, 20.9),
+        (11, 24.0, 83.0, 1001.8, 31.7, 1.3, 20.9),
+        (10, 24.0, 83.0, 1001.5, 32.0, 1.3, 20.9),
+        ( 9, 24.0, 83.0, 1001.1, 32.3, 1.3, 20.9),
+        ( 8, 24.0, 83.0, 1000.8, 32.6, 1.3, 20.9),
+        ( 7, 24.0, 83.0, 1000.4, 32.9, 1.3, 20.9),
+        ( 6, 24.0, 83.0, 1000.1, 33.2, 1.3, 20.9),
+        ( 5, 24.0, 83.0,  999.7, 33.5, 1.3, 20.9),
+        ( 4, 24.0, 83.0,  999.4, 33.8, 1.3, 20.9),
+        ( 3, 24.0, 83.0,  999.0, 34.1, 3.0, 20.9),
+        ( 2, 24.0, 83.0,  998.7, 34.4, 3.0, 20.9),
+        ( 1, 24.0, 83.0,  998.3, 34.7, 3.0, 20.9),
+        ( 0, 24.0, 83.0,  998.0, 35.0, 3.0, 20.9),
+    ]
+
+    rows = []
+    for hours_ago, temp, humidity, pressure, wind, precip, dew_point in hourly:
+        recorded_at_ms = now_ms - hours_ago * hour_ms
+        rows.append({
+            "cache_id": str(uuid.uuid4()),
+            "temp": temp,
+            "humidity": humidity,
+            "pressure": pressure,
+            "wind_speed": wind,
+            "wind_direction": 195.0,
+            "precipitation_amount": precip,
+            "dew_point_c": dew_point,
+            "elevation": 12.0,
+            "dist_to_coast_km": 155.0,
+            "nwp_cape_f36_max": 1000.0,
+            "nwp_cin_f36_max": -5.0,
+            "nwp_pwat_f36_max": 38.0,
+            "nwp_srh03_f36_max": 150.0,
+            "nwp_li_f36_min": -6.0,
+            "nwp_lcl_f36_min": 550.0,
+            "latitude": 30.22,
+            "longitude": -92.02,
+            "is_forecast": False,
+            "recorded_at_ms": recorded_at_ms,
+            "recorded_at": _to_central(recorded_at_ms),
+        })
+    return rows
+
+
 def _build_katrina_weather_data() -> list[dict]:
     """
     Returns 24 hourly rows of Hurricane Katrina-like conditions (New Orleans,
@@ -1236,21 +1428,26 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
                 "Prefer": "return=representation,resolution=merge-duplicates",
             }
 
-            # Ensure the simulation sentinel snapshot exists and always carries
-            # the full Katrina weather history so it is visible in Supabase
-            # immediately — no need to run StormSimulationActivity first.
-            await client.post(
-                f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
-                json=[{
-                    "weather_id": "00000000-0000-0000-0000-000000000000",
-                    "device_id": None,
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                    "is_current": True,
-                    "weather_data": _build_katrina_weather_data(),
-                    "snapshot_type": "seed",
-                }],
-                headers=headers,
-            )
+            # Seed all simulation sentinel rows so each tier's weather history
+            # is visible in Supabase immediately after a device onboards.
+            for _wid, _wdata in [
+                ("00000000-0000-0000-0000-000000000000", _build_clear_weather_data()),
+                ("10000000-0000-0000-0000-000000000000", _build_light_weather_data()),
+                ("20000000-0000-0000-0000-000000000000", _build_moderate_weather_data()),
+                ("30000000-0000-0000-0000-000000000000", _build_katrina_weather_data()),
+            ]:
+                await client.post(
+                    f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
+                    json=[{
+                        "weather_id": _wid,
+                        "device_id": None,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                        "is_current": True,
+                        "weather_data": _wdata,
+                        "snapshot_type": "seed",
+                    }],
+                    headers=headers,
+                )
 
             weather_rows = []
             for i, time_str in enumerate(times):
@@ -1377,6 +1574,7 @@ async def seed_weather_history(device_id: str, request: SeedWeatherHistoryReques
 # ============= SIMULATION SENTINEL =============
 
 class SentinelWeatherDataRequest(_BaseModel):
+    weather_id: str
     weather_data: list[dict]
 
 
@@ -1397,7 +1595,7 @@ async def update_simulation_sentinel(request: SentinelWeatherDataRequest):
             resp = await client.post(
                 f"{SUPABASE_BASE}/rest/v1/offline_weather_snapshot?on_conflict=weather_id",
                 json=[{
-                    "weather_id": "00000000-0000-0000-0000-000000000000",
+                    "weather_id": request.weather_id,
                     "device_id": None,
                     "synced_at": datetime.now(timezone.utc).isoformat(),
                     "is_current": True,
@@ -1408,7 +1606,7 @@ async def update_simulation_sentinel(request: SentinelWeatherDataRequest):
             )
             if resp.status_code not in [200, 201]:
                 raise HTTPException(status_code=502, detail=f"Supabase error: {resp.text[:300]}")
-            logger.info("✓ Simulation sentinel updated with %d weather rows", len(request.weather_data))
+            logger.info("✓ Simulation sentinel updated: %s (%d rows)", request.weather_id[:8], len(request.weather_data))
             return {"success": True, "rows": len(request.weather_data)}
     except HTTPException:
         raise
@@ -1426,6 +1624,7 @@ class ModelInstanceRequest(BaseModel):
     result_level: int
     result_type: str = "storm"
     confidence_score: float
+    predicted_dbz: float | None = None
     weather_id: str | None = None   # caller can supply (e.g. dummy UUID for simulations)
 
 
@@ -1437,6 +1636,7 @@ class ModelInstanceBatchItem(BaseModel):
     result_level: int
     result_type: str = "storm"
     confidence_score: float
+    predicted_dbz: float | None = None
     created_at: int  # epoch-ms from the device
     weather_id: str | None = None  # set by device at prediction time; None = fall back to lookup
 
@@ -1463,6 +1663,8 @@ async def create_model_instance(device_id: str, request: ModelInstanceRequest):
             "confidence_score": round(request.confidence_score, 4),
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if request.predicted_dbz is not None:
+            record["predicted_dbz"] = round(request.predicted_dbz, 2)
 
         async with httpx.AsyncClient(timeout=15) as client:
             headers = {
@@ -1534,6 +1736,8 @@ async def sync_model_instances(device_id: str, request: ModelInstanceBatchReques
                 "confidence_score": round(item.confidence_score, 4),
                 "created_at": created_at,
             }
+            if item.predicted_dbz is not None:
+                rec["predicted_dbz"] = round(item.predicted_dbz, 2)
             # Use the weather_id the device captured at prediction time when available
             if item.weather_id:
                 rec["weather_id"] = item.weather_id

@@ -3,7 +3,6 @@ package com.CMPS490.weathertracker.ml
 import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -11,18 +10,16 @@ import java.nio.FloatBuffer
 
 data class PredictionResult(
     val stormProbability: Float,
-    val alertState: Int,
+    val alertState: Int,      // 0 = clear, 1 = light, 2 = moderate, 3 = severe
     val threshold: Float,
     val modelVersion: String,
+    val predictedDbz: Float,  // raw predicted dBZ (before ÷75 normalisation)
 )
-
-private data class IsotonicEntry(val raw: Float, val cal: Float)
 
 private data class ModelMetadata(
     val experiment_name: String,
     val feature_cols: List<String>,
     val threshold: Double,
-    val isotonic_table: List<Map<String, Double>>?,
     val imputer_fill_values: Map<String, Double>?,
 )
 
@@ -40,31 +37,40 @@ class OnDevicePredictor private constructor(context: Context) {
             instance ?: synchronized(this) {
                 instance ?: OnDevicePredictor(context.applicationContext).also { instance = it }
             }
+
+        // dBZ tier thresholds (normalised to [0,1] by ÷75)
+        const val TIER_LIGHT    = 20f / 75f   // 0.267 → light rain
+        const val TIER_MODERATE = 30f / 75f   // 0.400 → moderate rain
+        const val TIER_SEVERE   = 40f / 75f   // 0.533 → severe / thunderstorms
+
+        fun probabilityToTier(prob: Float): Int = when {
+            prob >= TIER_SEVERE   -> 3
+            prob >= TIER_MODERATE -> 2
+            prob >= TIER_LIGHT    -> 1
+            else                  -> 0
+        }
+
+        fun tierToName(tier: Int): String = when (tier) {
+            1    -> "light"
+            2    -> "moderate"
+            3    -> "severe"
+            else -> "clear"
+        }
     }
 
     private val metadata: ModelMetadata
     private val ortEnv: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var ortSession: OrtSession? = null
-    private val isotonicTable: List<IsotonicEntry>?
     private val imputerFills: Map<String, Float>
 
     init {
         val metaJson = context.assets.open(METADATA_FILE).bufferedReader().use { it.readText() }
         metadata = Gson().fromJson(metaJson, ModelMetadata::class.java)
 
-        isotonicTable = metadata.isotonic_table?.map { entry ->
-            IsotonicEntry(
-                raw = entry["raw"]?.toFloat() ?: 0f,
-                cal = entry["cal"]?.toFloat() ?: 0f,
-            )
-        }
-
-        // Load imputer fill values (median) for missing feature imputation
         imputerFills = metadata.imputer_fill_values
             ?.mapValues { it.value.toFloat() }
             ?: emptyMap()
 
-        // Load ONNX session — model.onnx may not exist at build time (only after conversion)
         try {
             val modelBytes = context.assets.open(MODEL_FILE).readBytes()
             ortSession = ortEnv.createSession(modelBytes, OrtSession.SessionOptions())
@@ -76,7 +82,7 @@ class OnDevicePredictor private constructor(context: Context) {
 
     fun predict(features: Map<String, Float?>): PredictionResult {
         val session = ortSession
-            ?: return PredictionResult(0f, 0, metadata.threshold.toFloat(), metadata.experiment_name)
+            ?: return PredictionResult(0f, 0, metadata.threshold.toFloat(), metadata.experiment_name, 0f)
 
         // Apply imputation: use the feature value if present, otherwise
         // fall back to the median fill value from the training set.
@@ -96,33 +102,25 @@ class OnDevicePredictor private constructor(context: Context) {
         return tensor.use {
             val results = session.run(mapOf(inputName to it))
             results.use { output ->
-                // Probability is in output[1] (predict_proba), index 1 = positive class
-                @Suppress("UNCHECKED_CAST")
-                val probArray = (output[1].value as Array<FloatArray>)[0]
-                val rawProb = probArray[1]
-                val calibratedProb = calibrate(rawProb)
                 val threshold = metadata.threshold.toFloat()
+                // Regressor: output[0] is predicted dBZ.
+                // Normalised to [0,1] by ÷75 so stormProbability >= threshold ↔ dBZ >= dBZ_threshold.
+                val rawVal = output[0].value
+                val predictedDbz: Float = when (rawVal) {
+                    is FloatArray -> rawVal[0]
+                    is Array<*> -> @Suppress("UNCHECKED_CAST") (rawVal as Array<FloatArray>)[0][0]
+                    else -> rawVal.toString().toFloatOrNull() ?: 0f
+                }
+                val stormProb = (predictedDbz / 75f).coerceIn(0f, 1f)
                 PredictionResult(
-                    stormProbability = calibratedProb,
-                    alertState = if (calibratedProb >= threshold) 1 else 0,
+                    stormProbability = stormProb,
+                    alertState = probabilityToTier(stormProb),
                     threshold = threshold,
                     modelVersion = metadata.experiment_name,
+                    predictedDbz = predictedDbz.coerceAtLeast(0f),
                 )
             }
         }
     }
-
-    private fun calibrate(rawProb: Float): Float {
-        val table = isotonicTable ?: return rawProb
-        if (table.isEmpty()) return rawProb
-        if (rawProb <= table.first().raw) return table.first().cal
-        if (rawProb >= table.last().raw) return table.last().cal
-
-        val idx = table.indexOfFirst { it.raw >= rawProb }
-        if (idx <= 0) return table.first().cal
-        val lo = table[idx - 1]
-        val hi = table[idx]
-        val t = (rawProb - lo.raw) / (hi.raw - lo.raw)
-        return lo.cal + t * (hi.cal - lo.cal)
-    }
 }
+

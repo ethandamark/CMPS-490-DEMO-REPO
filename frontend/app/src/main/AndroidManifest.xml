@@ -74,6 +74,20 @@
             android:name=".StormSimulationActivity"
             android:exported="true"
             android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- Condition-specific simulation activities -->
+        <activity
+            android:name=".ClearSimulationActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <activity
+            android:name=".LightSimulationActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <activity
+            android:name=".ModerateSimulationActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
     </application>
 
 </manifest>

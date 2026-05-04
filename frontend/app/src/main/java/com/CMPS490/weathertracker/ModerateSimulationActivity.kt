@@ -23,60 +23,51 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
- * Injects 24 hours of pre-computed Hurricane Katrina-like weather data into Room DB,
- * runs the on-device ML predictor, and fires a storm notification if triggered.
+ * Injects 24 hours of moderate-storm weather data into Room DB, runs the on-device ML predictor,
+ * and fires a notification. Expected outcome: tier 2 (Moderate), ~34.8 dBZ.
+ *
+ * Scenario: Lafayette, LA — approaching MCS with steadily falling pressure (1006→998 hPa),
+ * building southerly winds (28→35 km/h), and onset rain (1.3→3.0 mm/h).
+ * NWP: CAPE=1000 J/kg, LI=−6.0, PWAT=38 mm. Calibrated against deployed ONNX model.
  *
  * Usage:
- *   adb shell am start -n com.CMPS490.weathertracker/.StormSimulationActivity
- *
- * This does NOT modify the model threshold. It uses real-world extreme weather
- * conditions modeled after Hurricane Katrina's approach to the Gulf Coast
- * (Aug 29, 2005, New Orleans area) to organically trigger a storm prediction.
+ *   adb shell am start -n com.CMPS490.weathertracker/.ModerateSimulationActivity
  */
-class StormSimulationActivity : ComponentActivity() {
+class ModerateSimulationActivity : ComponentActivity() {
 
     companion object {
-        private const val TAG = "StormSimulation"
+        private const val TAG = "ModerateSimulation"
 
-        // New Orleans area — Katrina landfall
-        private const val LAT = 29.95
-        private const val LON = -90.07
+        // Lafayette, LA
+        private const val LAT = 30.22
+        private const val LON = -92.02
 
-        // Tier-prefixed UUID so each simulation scenario has its own sentinel row
-        private const val SIMULATION_SNAPSHOT_ID = "30000000-0000-0000-0000-000000000000"
+        private const val SIMULATION_SNAPSHOT_ID = "20000000-0000-0000-0000-000000000000"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         Log.d(TAG, "══════════════════════════════════════════")
-        Log.d(TAG, "🌀 STORM SIMULATION — Hurricane Katrina")
+        Log.d(TAG, "⛈\uFE0F  MODERATE SIMULATION — Approaching MCS")
         Log.d(TAG, "══════════════════════════════════════════")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val db = WeatherDatabase.getInstance(this@StormSimulationActivity)
+                val db = WeatherDatabase.getInstance(this@ModerateSimulationActivity)
 
-                // Clear existing cache near this location so our data dominates
                 val delta = 50 * 0.009
                 db.weatherCacheDao().deleteNear(
-                    latMin = LAT - delta,
-                    latMax = LAT + delta,
-                    lonMin = LON - delta,
-                    lonMax = LON + delta,
+                    latMin = LAT - delta, latMax = LAT + delta,
+                    lonMin = LON - delta, lonMax = LON + delta,
                 )
                 Log.d(TAG, "✓ Cleared existing cache near ($LAT, $LON)")
 
-                // Insert 24 hours of Hurricane Katrina-like conditions
-                val entries = buildKatrinaSnapshots()
+                val entries = buildModerateSnapshots()
                 db.weatherCacheDao().upsertAll(entries)
-                Log.d(TAG, "✓ Inserted ${entries.size} Katrina weather snapshots")
-
-                // Upload Katrina rows to the simulation sentinel snapshot so the
-                // weather history is visible in the backend / Supabase dashboard.
+                Log.d(TAG, "✓ Inserted ${entries.size} moderate-storm snapshots")
                 uploadSentinelWeatherData(entries)
 
-                // Assemble features and run prediction
                 val features = FeatureAssemblyService(db).assembleFeatures(LAT, LON)
                 if (features.isEmpty()) {
                     Log.e(TAG, "✗ Feature assembly returned empty")
@@ -84,57 +75,48 @@ class StormSimulationActivity : ComponentActivity() {
                 }
                 Log.d(TAG, "✓ Assembled ${features.size} features")
 
-                val predictor = OnDevicePredictor.getInstance(this@StormSimulationActivity)
+                val predictor = OnDevicePredictor.getInstance(this@ModerateSimulationActivity)
                 val result = predictor.predict(features)
 
                 Log.d(TAG, "══════════════════════════════════════════")
-                Log.d(TAG, "🌀 SIMULATION RESULT:")
-                Log.d(TAG, "   Probability: ${result.stormProbability}")
-                Log.d(TAG, "   Alert State: ${result.alertState}")
-                Log.d(TAG, "   Threshold:   ${result.threshold}")
-                Log.d(TAG, "   Model:       ${result.modelVersion}")
+                Log.d(TAG, "⛈\uFE0F  SIMULATION RESULT:")
+                Log.d(TAG, "   Predicted dBZ: ${result.predictedDbz}")
+                Log.d(TAG, "   Tier:          ${result.alertState} (${OnDevicePredictor.tierToName(result.alertState)})")
+                Log.d(TAG, "   Probability:   ${result.stormProbability}")
+                Log.d(TAG, "   Threshold:     ${result.threshold}")
                 Log.d(TAG, "══════════════════════════════════════════")
 
                 if (result.alertState >= 2) {
                     fireStormNotification(result.stormProbability)
-                    Log.d(TAG, "🔔 STORM NOTIFICATION FIRED!")
+                    Log.d(TAG, "\uD83D\uDD14 MODERATE NOTIFICATION FIRED!")
                 } else {
-                    Log.w(TAG, "⚠ Model did NOT trigger alert — probability below threshold")
+                    Log.w(TAG, "⚠ Model did NOT trigger alert — probability below threshold (tier=${result.alertState})")
                 }
 
-                // Record model instance in Supabase
                 sendModelInstance(result)
 
             } catch (e: Exception) {
-                Log.e(TAG, "Storm simulation failed", e)
+                Log.e(TAG, "Moderate simulation failed", e)
             }
         }
 
-        // Finish immediately (API 36+ requirement)
         finish()
     }
 
     /**
-     * Builds 24 hourly WeatherCacheEntity rows simulating Hurricane Katrina's
-     * approach and landfall on the Gulf Coast.
-     *
-     * Data based on historical NWS/NOAA reports for Aug 28-29, 2005:
-     * - Pressure dropped from ~990 hPa to ~920 hPa over 24h
-     * - Sustained winds 80-200+ km/h
-     * - Continuous heavy rainfall (10-30 mm/h)
-     * - Near-100% humidity, saturated dew point
-     * - Extreme CAPE (3000-4500 J/kg), very negative LI (-8 to -10)
+     * 24 hours of approaching MCS conditions (empirically calibrated against the ONNX model):
+     * - Pressure steadily falling 1006 → 998 hPa over 24 h (storm still approaching)
+     * - Humidity 83 %, temp 24 °C throughout
+     * - Winds building 28 → 35 km/h from south
+     * - Light rain 1.3 mm/h building to 3.0 mm/h at onset
+     * - Moderate CAPE ~1000, LI –6.0, PWAT 38 mm
+     * Expected model output: ~34.8 dBZ → tier 2 (moderate), notification fires.
      */
-    private fun buildKatrinaSnapshots(): List<WeatherCacheEntity> {
+    private fun buildModerateSnapshots(): List<WeatherCacheEntity> {
         val now = System.currentTimeMillis()
         val hourMs = 3_600_000L
-
-        // Set base time to 3 PM UTC in August (peak afternoon convection)
-        // We'll make the last entry "now" and work backwards
         val baseHour = (now / hourMs) * hourMs
 
-        // 24 hours of escalating hurricane conditions (oldest → newest)
-        // Each row: temp, humidity, pressure, wind, precip, dewPoint
         data class HourData(
             val hoursAgo: Int,
             val temp: Double,
@@ -146,35 +128,32 @@ class StormSimulationActivity : ComponentActivity() {
         )
 
         val hourlyData = listOf(
-            // Outer bands arrive — conditions deteriorating
-            HourData(23, 30.5, 88.0, 990.0,  45.0,  2.0, 28.0),
-            HourData(22, 30.2, 89.0, 988.5,  48.0,  3.0, 28.0),
-            HourData(21, 30.0, 90.0, 986.0,  52.0,  5.0, 28.5),
-            HourData(20, 29.8, 91.0, 983.0,  56.0,  7.0, 28.5),
-            HourData(19, 29.5, 92.0, 980.0,  60.0,  8.0, 28.5),
-            HourData(18, 29.2, 93.0, 977.0,  65.0, 10.0, 28.5),
-            // Eye wall bands — heavy rain, wind ramping
-            HourData(17, 29.0, 94.0, 973.0,  72.0, 12.0, 28.5),
-            HourData(16, 28.8, 95.0, 969.0,  78.0, 15.0, 28.0),
-            HourData(15, 28.5, 95.0, 965.0,  85.0, 18.0, 28.0),
-            HourData(14, 28.3, 96.0, 960.0,  92.0, 20.0, 27.8),
-            HourData(13, 28.0, 96.0, 955.0, 100.0, 22.0, 27.5),
-            HourData(12, 27.8, 97.0, 950.0, 110.0, 25.0, 27.5),
-            // Core approach — extreme conditions
-            HourData(11, 27.5, 97.0, 945.0, 120.0, 28.0, 27.2),
-            HourData(10, 27.2, 98.0, 940.0, 130.0, 30.0, 27.0),
-            HourData( 9, 27.0, 98.0, 935.0, 140.0, 32.0, 26.8),
-            HourData( 8, 26.8, 98.0, 932.0, 148.0, 33.0, 26.5),
-            HourData( 7, 26.5, 99.0, 928.0, 155.0, 35.0, 26.3),
-            HourData( 6, 26.2, 99.0, 925.0, 160.0, 35.0, 26.0),
-            // Landfall — peak intensity
-            HourData( 5, 26.0, 99.0, 922.0, 170.0, 38.0, 25.8),
-            HourData( 4, 25.8, 99.0, 920.0, 180.0, 40.0, 25.5),
-            HourData( 3, 25.5, 99.0, 920.0, 185.0, 42.0, 25.3),
-            // Post-landfall — still extreme but weakening slightly
-            HourData( 2, 25.5, 99.0, 922.0, 175.0, 38.0, 25.3),
-            HourData( 1, 25.8, 98.0, 925.0, 160.0, 35.0, 25.5),
-            HourData( 0, 26.0, 98.0, 928.0, 150.0, 30.0, 25.8),
+            // Approaching storm — steady pressure fall, rain building
+            HourData(23, 24.0, 83.0, 1006.0, 28.0, 1.3, 20.9),
+            HourData(22, 24.0, 83.0, 1005.7, 28.3, 1.3, 20.9),
+            HourData(21, 24.0, 83.0, 1005.3, 28.6, 1.3, 20.9),
+            HourData(20, 24.0, 83.0, 1005.0, 28.9, 1.3, 20.9),
+            HourData(19, 24.0, 83.0, 1004.6, 29.2, 1.3, 20.9),
+            HourData(18, 24.0, 83.0, 1004.3, 29.5, 1.3, 20.9),
+            HourData(17, 24.0, 83.0, 1003.9, 29.8, 1.3, 20.9),
+            HourData(16, 24.0, 83.0, 1003.6, 30.1, 1.3, 20.9),
+            HourData(15, 24.0, 83.0, 1003.2, 30.4, 1.3, 20.9),
+            HourData(14, 24.0, 83.0, 1002.9, 30.7, 1.3, 20.9),
+            HourData(13, 24.0, 83.0, 1002.5, 31.0, 1.3, 20.9),
+            HourData(12, 24.0, 83.0, 1002.2, 31.3, 1.3, 20.9),
+            HourData(11, 24.0, 83.0, 1001.8, 31.7, 1.3, 20.9),
+            HourData(10, 24.0, 83.0, 1001.5, 32.0, 1.3, 20.9),
+            HourData( 9, 24.0, 83.0, 1001.1, 32.3, 1.3, 20.9),
+            HourData( 8, 24.0, 83.0, 1000.8, 32.6, 1.3, 20.9),
+            HourData( 7, 24.0, 83.0, 1000.4, 32.9, 1.3, 20.9),
+            HourData( 6, 24.0, 83.0, 1000.1, 33.2, 1.3, 20.9),
+            HourData( 5, 24.0, 83.0,  999.7, 33.5, 1.3, 20.9),
+            HourData( 4, 24.0, 83.0,  999.4, 33.8, 1.3, 20.9),
+            // Storm onset — rain intensifies
+            HourData( 3, 24.0, 83.0,  999.0, 34.1, 3.0, 20.9),
+            HourData( 2, 24.0, 83.0,  998.7, 34.4, 3.0, 20.9),
+            HourData( 1, 24.0, 83.0,  998.3, 34.7, 3.0, 20.9),
+            HourData( 0, 24.0, 83.0,  998.0, 35.0, 3.0, 20.9),
         )
 
         return hourlyData.map { h ->
@@ -183,7 +162,7 @@ class StormSimulationActivity : ComponentActivity() {
                 temp = h.temp,
                 humidity = h.humidity,
                 windSpeed = h.wind,
-                windDirection = 180.0, // southerly (typical for hurricane approach)
+                windDirection = 195.0,        // southerly inflow ahead of approaching MCS
                 precipitationAmount = h.precip,
                 pressure = h.pressure,
                 recordedAt = baseHour - (h.hoursAgo * hourMs),
@@ -191,17 +170,16 @@ class StormSimulationActivity : ComponentActivity() {
                 longitude = LON,
                 isForecast = false,
                 dewPointC = h.dewPoint,
-                elevation = 1.0,  // New Orleans — near sea level
-                distToCoastKm = 15.0,  // very close to coast
-                // Extreme NWP values — high instability
-                nwpCapeF36Max = 4200.0,   // extreme CAPE
-                nwpCinF36Max = -0.5,      // negligible CIN (no cap)
-                nwpPwatF36Max = 65.0,     // very high precipitable water
-                nwpSrh03F36Max = 350.0,   // high storm-relative helicity
-                nwpLiF36Min = -9.5,       // deeply negative lifted index
-                nwpLclF36Min = 300.0,     // low LCL (near surface condensation)
-                nwpAvailableLeads = 6.0,  // all forecast leads available
-                mrmsMaxDbz75km = 55.0,
+                elevation = 12.0,
+                distToCoastKm = 155.0,
+                nwpCapeF36Max = 1000.0,       // moderate instability
+                nwpCinF36Max = -5.0,          // moderate cap
+                nwpPwatF36Max = 38.0,         // good moisture
+                nwpSrh03F36Max = 150.0,       // moderate helicity
+                nwpLiF36Min = -6.0,           // negative LI — convection likely
+                nwpLclF36Min = 550.0,         // moderate LCL
+                nwpAvailableLeads = 4.0,
+                mrmsMaxDbz75km = 35.0,        // moderate radar returns ahead of system
             )
         }
     }
@@ -239,38 +217,12 @@ class StormSimulationActivity : ComponentActivity() {
             }
             val response = BackendRetrofitInstance.api.updateSimulationSentinel(body).execute()
             if (response.isSuccessful) {
-                Log.d(TAG, "✓ Simulation sentinel updated with ${entries.size} Katrina rows")
+                Log.d(TAG, "✓ Simulation sentinel updated with ${entries.size} moderate-storm rows")
             } else {
                 Log.w(TAG, "✗ Sentinel upload failed: ${response.code()}")
             }
         } catch (e: Exception) {
             Log.w(TAG, "✗ Sentinel upload error: ${e.message}")
-        }
-    }
-
-    private fun sendModelInstance(result: PredictionResult) {
-        try {
-            val authService = AuthenticationService(this)
-            val deviceId = authService.getStoredDeviceId() ?: "storm-sim"
-            val resultType = OnDevicePredictor.tierToName(result.alertState)
-            val body = com.google.gson.JsonObject().apply {
-                addProperty("version", "v1.0.0")
-                addProperty("latitude", LAT)
-                addProperty("longitude", LON)
-                addProperty("result_level", result.alertState)
-                addProperty("result_type", resultType)
-                addProperty("confidence_score", result.stormProbability.toDouble())
-                addProperty("predicted_dbz", result.predictedDbz.toDouble())
-                addProperty("weather_id", SIMULATION_SNAPSHOT_ID)
-            }
-            val response = BackendRetrofitInstance.api.createModelInstance(deviceId, body).execute()
-            if (response.isSuccessful) {
-                Log.d(TAG, "✓ model_instance recorded")
-            } else {
-                Log.w(TAG, "✗ model_instance failed: ${response.code()}")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "✗ model_instance error: ${e.message}")
         }
     }
 
@@ -314,5 +266,31 @@ class StormSimulationActivity : ComponentActivity() {
             .build()
 
         nm.notify(2001, notification)
+    }
+
+    private fun sendModelInstance(result: PredictionResult) {
+        try {
+            val authService = AuthenticationService(this)
+            val deviceId = authService.getStoredDeviceId() ?: "moderate-sim"
+            val resultType = OnDevicePredictor.tierToName(result.alertState)
+            val body = com.google.gson.JsonObject().apply {
+                addProperty("version", "v1.0.0")
+                addProperty("latitude", LAT)
+                addProperty("longitude", LON)
+                addProperty("result_level", result.alertState)
+                addProperty("result_type", resultType)
+                addProperty("confidence_score", result.stormProbability.toDouble())
+                addProperty("predicted_dbz", result.predictedDbz.toDouble())
+                addProperty("weather_id", SIMULATION_SNAPSHOT_ID)
+            }
+            val response = BackendRetrofitInstance.api.createModelInstance(deviceId, body).execute()
+            if (response.isSuccessful) {
+                Log.d(TAG, "✓ model_instance recorded (tier=$resultType)")
+            } else {
+                Log.w(TAG, "✗ model_instance failed: ${response.code()}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "✗ model_instance error: ${e.message}")
+        }
     }
 }

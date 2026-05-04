@@ -18,9 +18,24 @@ Uses default coordinates: Lafayette, LA (30.2241, -92.0198).
 
 ---
 
-## 2. Hurricane Staged Prediction (Storm Simulation)
+## 2. Clear Weather Staged Prediction
+```
+adb shell am start -n com.CMPS490.weathertracker/.ClearSimulationActivity
+```
 
-Injects 24 hours of pre-computed Hurricane Katrina-like weather data into Room DB and runs the predictor. This is guaranteed to trigger a storm alert notification (probability ~70%, well above the 0.5045 threshold).
+## 3. Light Rain Staged Prediction
+```
+adb shell am start -n com.CMPS490.weathertracker/.LightSimulationActivity
+```
+
+## 4. Moderate Rain Staged Prediction
+```
+adb shell am start -n com.CMPS490.weathertracker/.ModerateSimulationActivity
+```
+
+## 5. Hurricane Staged Prediction (Storm Simulation)
+
+Injects 24 hours of pre-computed Hurricane Katrina-like weather data into Room DB and runs the predictor. This is guaranteed to trigger a storm alert notification (predicted dBZ well above the 32.9 dBZ / tier 2 threshold).
 
 ```bash
 adb shell am start -n com.CMPS490.weathertracker/.StormSimulationActivity
@@ -34,24 +49,24 @@ Uses coordinates: New Orleans, LA (29.95, -90.07). Simulated conditions include:
 
 ---
 
-## 3. Logcat — Prediction View
+## 6. Logcat — Prediction View
 
 View prediction results only (compact output):
 
 ```bash
-adb logcat -s DebugPredict:D StormSimulation:D
+adb logcat -s DebugPredict:D StormSimulation:D ClearSimulation:D LightSimulation:D ModerateSimulation:D
 ```
 
-This filters to just the prediction activity logs showing probability, alert state, threshold, and model version.
+This filters to just the simulation and prediction activity logs showing predicted dBZ, tier, probability, and threshold.
 
 ---
 
-## 4. Logcat — Verbose Prediction View
+## 7. Logcat — Verbose Prediction View
 
 View prediction results **plus all 33 feature values** used by the model:
 
 ```bash
-adb logcat -s DebugPredict:D StormSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
+adb logcat -s DebugPredict:D StormSimulation:D ClearSimulation:D LightSimulation:D ModerateSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
 ```
 
 This shows every feature fed into the ONNX model (temp, pressure, humidity, wind, precipitation aggregates, NWP values, etc.) in addition to the final prediction result.
@@ -80,6 +95,11 @@ adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.DebugPredictAct
 
 # Storm simulation + verbose results
 adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.StormSimulationActivity; Start-Sleep -Seconds 8; adb logcat -d -s StormSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
+
+# Clear / Light / Moderate simulations
+adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.ClearSimulationActivity; Start-Sleep -Seconds 8; adb logcat -d -s ClearSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
+adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.LightSimulationActivity; Start-Sleep -Seconds 8; adb logcat -d -s LightSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
+adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.ModerateSimulationActivity; Start-Sleep -Seconds 8; adb logcat -d -s ModerateSimulation:D FeatureAssemblyService:D OnDevicePredictor:I
 ```
 
 ---
@@ -90,6 +110,9 @@ adb logcat -c; adb shell am start -n com.CMPS490.weathertracker/.StormSimulation
 |-----|--------|---------|
 | `DebugPredict` | `DebugPredictActivity` | Live weather fetch + prediction result |
 | `StormSimulation` | `StormSimulationActivity` | Katrina data injection + prediction result |
+| `ClearSimulation` | `ClearSimulationActivity` | Clear-sky data injection + prediction result |
+| `LightSimulation` | `LightSimulationActivity` | Light-rain data injection + prediction result |
+| `ModerateSimulation` | `ModerateSimulationActivity` | MCS data injection + prediction result |
 | `FeatureAssemblyService` | `FeatureAssemblyService` | All 33 feature values, snapshot count |
 | `OnDevicePredictor` | `OnDevicePredictor` | ONNX model load, raw/calibrated probabilities |
 | `LocationTrackingService` | `LocationTrackingService` | Hourly background predictions + location updates |

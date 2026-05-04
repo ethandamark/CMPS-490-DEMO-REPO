@@ -6,6 +6,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -440,11 +442,11 @@ class LocationTrackingService : Service() {
                         )
                         db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
-                        if (result.alertState == 1) {
+                        if (result.alertState >= 2) {
                             fireStormNotification(result.stormProbability)
                         }
 
-                        val resultType = if (result.alertState == 1) "storm" else "clear"
+                        val resultType = OnDevicePredictor.tierToName(result.alertState)
                         db.modelInstanceDao().upsert(
                             com.CMPS490.weathertracker.data.ModelInstanceEntity(
                                 instanceId = UUID.randomUUID().toString(),
@@ -456,6 +458,7 @@ class LocationTrackingService : Service() {
                                 resultType = resultType,
                                 confidenceScore = result.stormProbability,
                                 createdAt = nowMs,
+                                predictedDbz = result.predictedDbz,
                             )
                         )
                         db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
@@ -489,7 +492,7 @@ class LocationTrackingService : Service() {
                 nwpLiF36Min = weatherData.optNullableDouble("nwp_li_f3_6_min", "nwp_li_f36_min"),
                 nwpLclF36Min = weatherData.optNullableDouble("nwp_lcl_f3_6_min", "nwp_lcl_f36_min"),
                 nwpAvailableLeads = weatherData.optNullableDouble("nwp_available_leads", "nwp_available"),
-                mrmsMaxDbz75km = null,
+                mrmsMaxDbz75km = weatherData.optDouble("mrms_max_dbz_75km").takeUnless { it.isNaN() },
             )
 
             db.weatherCacheDao().upsert(cacheEntity)
@@ -546,12 +549,12 @@ class LocationTrackingService : Service() {
                     )
                     db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
-                    if (result.alertState == 1) {
+                    if (result.alertState >= 2) {
                         fireStormNotification(result.stormProbability)
                     }
 
                     // Store model instance locally — sync worker will push to backend
-                    val resultType = if (result.alertState == 1) "storm" else "clear"
+                    val resultType = OnDevicePredictor.tierToName(result.alertState)
                     db.modelInstanceDao().upsert(
                         com.CMPS490.weathertracker.data.ModelInstanceEntity(
                             instanceId = java.util.UUID.randomUUID().toString(),
@@ -564,6 +567,7 @@ class LocationTrackingService : Service() {
                             confidenceScore = result.stormProbability,
                             createdAt = nowMs,
                             weatherId = snapshotId,
+                            predictedDbz = result.predictedDbz,
                         )
                     )
                     // Prune synced model instances older than 48h
@@ -936,11 +940,11 @@ class LocationTrackingService : Service() {
                     )
                     db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
-                    if (result.alertState == 1) {
+                    if (result.alertState >= 2) {
                         fireStormNotification(result.stormProbability)
                     }
 
-                    val resultType = if (result.alertState == 1) "storm" else "clear"
+                    val resultType = OnDevicePredictor.tierToName(result.alertState)
                     db.modelInstanceDao().upsert(
                         com.CMPS490.weathertracker.data.ModelInstanceEntity(
                             instanceId = java.util.UUID.randomUUID().toString(),
@@ -953,6 +957,7 @@ class LocationTrackingService : Service() {
                             confidenceScore = result.stormProbability,
                             createdAt = nowMs,
                             weatherId = snapshotId,
+                            predictedDbz = result.predictedDbz,
                         )
                     )
                     db.modelInstanceDao().pruneOld(nowMs - 48 * MILLIS_PER_HOUR)
@@ -973,15 +978,23 @@ class LocationTrackingService : Service() {
     }
 
     private fun fireStormNotification(probability: Float) {
-        val channelId = "storm_alert_channel"
+        val channelId = "storm_alert_channel_v2"
         val nm = getSystemService(NotificationManager::class.java)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val channel = NotificationChannel(
                 channelId,
                 "Storm Alerts",
                 NotificationManager.IMPORTANCE_HIGH,
-            ).apply { description = "On-device storm probability alerts" }
+            ).apply {
+                description = "On-device storm probability alerts"
+                setSound(soundUri, audioAttr)
+            }
             nm.createNotificationChannel(channel)
         }
 
@@ -991,13 +1004,19 @@ class LocationTrackingService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        val tier = OnDevicePredictor.probabilityToTier(probability)
+        val (notifTitle, notifText) = when (tier) {
+            3    -> "🚨 Severe Storm Warning" to "Severe conditions detected — ${(probability * 100).toInt()}% storm intensity"
+            else -> "⚠️ Storm Risk Detected" to "Moderate rain likely — ${(probability * 100).toInt()}% storm intensity"
+        }
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("⚠️ Storm Risk Detected")
-            .setContentText("On-device model: ${(probability * 100).toInt()}% storm probability")
+            .setContentTitle(notifTitle)
+            .setContentText(notifText)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND)
             .build()
 
         nm.notify(2001, notification)

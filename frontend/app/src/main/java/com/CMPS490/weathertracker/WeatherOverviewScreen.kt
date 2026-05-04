@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerThemeState
+import com.CMPS490.weathertracker.ml.OnDevicePredictor
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MapStyleOptions
@@ -54,7 +55,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
-private const val STORM_ALERT_THRESHOLD = 0.4901f
 private const val MAX_BAR_HEIGHT_DP = 48f
 private const val MIN_BAR_HEIGHT_DP = 4f
 
@@ -362,8 +362,13 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 timeline.takeLast(24).forEach { (timestamp, probability) ->
-                    val isAlert = probability >= STORM_ALERT_THRESHOLD
-                    val barColor = if (isAlert) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    val tier = OnDevicePredictor.probabilityToTier(probability)
+                    val barColor = when (tier) {
+                        3    -> Color(0xFFD32F2F)                        // severe — deep red
+                        2    -> Color(0xFFFFD600)                        // moderate — yellow
+                        1    -> MaterialTheme.colorScheme.primary         // light — blue
+                        else -> MaterialTheme.colorScheme.surfaceVariant  // clear — gray
+                    }
                     val barHeight = (probability * MAX_BAR_HEIGHT_DP).coerceAtLeast(MIN_BAR_HEIGHT_DP)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -389,7 +394,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Yellow bars indicate storm risk above threshold",
+                text = "Gray · Blue · Yellow · Orange · Red  —  Clear to Severe",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.mutedText,
                 textAlign = TextAlign.Center,
