@@ -528,9 +528,10 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     val db = com.CMPS490.weathertracker.data.WeatherDatabase.getInstance(context)
                     db.hourlyPredictionDao().observeAll().collect { all ->
-                        val cutoff = System.currentTimeMillis() - LocationTrackingService.MILLIS_PER_HOUR
+                        // Show the 3 most recent predictions in the visual display.
+                        // Oldest entry drops off automatically as new ones arrive.
                         stormRiskTimeline = all
-                            .filter { it.timestamp >= cutoff }
+                            .takeLast(3)
                             .map { it.timestamp to it.stormProbability }
                     }
                 }
