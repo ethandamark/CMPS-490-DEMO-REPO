@@ -101,13 +101,13 @@ class DebugPredictActivity : ComponentActivity() {
                         dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
                         elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
                         distToCoastKm = null,
-                        nwpCapeF36Max = null,
-                        nwpCinF36Max = null,
-                        nwpPwatF36Max = null,
-                        nwpSrh03F36Max = null,
-                        nwpLiF36Min = null,
-                        nwpLclF36Min = null,
-                        nwpAvailableLeads = null,
+                        nwpCapeF36Max = weatherData.optDouble("nwp_cape_f3_6_max").takeUnless { it.isNaN() },
+                        nwpCinF36Max = weatherData.optDouble("nwp_cin_f3_6_max").takeUnless { it.isNaN() },
+                        nwpPwatF36Max = weatherData.optDouble("nwp_pwat_f3_6_max").takeUnless { it.isNaN() },
+                        nwpSrh03F36Max = weatherData.optDouble("nwp_srh03_f3_6_max").takeUnless { it.isNaN() },
+                        nwpLiF36Min = weatherData.optDouble("nwp_li_f3_6_min").takeUnless { it.isNaN() },
+                        nwpLclF36Min = weatherData.optDouble("nwp_lcl_f3_6_min").takeUnless { it.isNaN() },
+                        nwpAvailableLeads = weatherData.optDouble("nwp_available_leads").takeUnless { it.isNaN() },
                         mrmsMaxDbz75km = weatherData.optDouble("mrms_max_dbz_75km").takeUnless { it.isNaN() },
                     )
                     db.weatherCacheDao().upsert(cacheEntity)
@@ -270,13 +270,13 @@ class DebugPredictActivity : ComponentActivity() {
                     dewPointC = row.optDouble("dew_point_c").takeUnless { it.isNaN() },
                     elevation = row.optDouble("elevation").takeUnless { it.isNaN() },
                     distToCoastKm = null,
-                    nwpCapeF36Max = null,
-                    nwpCinF36Max = null,
-                    nwpPwatF36Max = null,
-                    nwpSrh03F36Max = null,
-                    nwpLiF36Min = null,
-                    nwpLclF36Min = null,
-                    nwpAvailableLeads = null,
+                    nwpCapeF36Max = row.optDouble("nwp_cape_f3_6_max").takeUnless { it.isNaN() },
+                    nwpCinF36Max = row.optDouble("nwp_cin_f3_6_max").takeUnless { it.isNaN() },
+                    nwpPwatF36Max = row.optDouble("nwp_pwat_f3_6_max").takeUnless { it.isNaN() },
+                    nwpSrh03F36Max = row.optDouble("nwp_srh03_f3_6_max").takeUnless { it.isNaN() },
+                    nwpLiF36Min = row.optDouble("nwp_li_f3_6_min").takeUnless { it.isNaN() },
+                    nwpLclF36Min = row.optDouble("nwp_lcl_f3_6_min").takeUnless { it.isNaN() },
+                    nwpAvailableLeads = row.optDouble("nwp_available_leads").takeUnless { it.isNaN() },
                     mrmsMaxDbz75km = null,
                 ))
 
@@ -353,7 +353,16 @@ class DebugPredictActivity : ComponentActivity() {
                     }
                 }
             }
-            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
+            // Attach NWP aggregates so the model gets the same features as via the backend proxy
+            val nwp = NwpFetcher.fetchAggregates(httpClient, latitude, longitude, current.optString("time"))
+            nwp.capeMax?.let  { current.put("nwp_cape_f3_6_max",  it) }
+            nwp.cinMax?.let   { current.put("nwp_cin_f3_6_max",   it) }
+            nwp.pwatMax?.let  { current.put("nwp_pwat_f3_6_max",  it) }
+            nwp.srh03Max?.let { current.put("nwp_srh03_f3_6_max", it) }
+            nwp.liMin?.let    { current.put("nwp_li_f3_6_min",    it) }
+            nwp.lclMin?.let   { current.put("nwp_lcl_f3_6_min",   it) }
+            current.put("nwp_available_leads", nwp.availableLeads)
+            Log.d(TAG, "\u2713 Weather via direct Open-Meteo fallback (NWP leads=${nwp.availableLeads})")
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo error: ${e.message}")

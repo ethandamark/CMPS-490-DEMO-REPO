@@ -159,3 +159,99 @@ object OpenMeteoFallback {
         else -> WeatherType.PartlyCloudy
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NWP Fetcher — mirrors backend `_add_nwp_aggregates` for the direct fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetches NWP hourly variables from Open-Meteo and computes the 3–6 h window
+ * aggregates expected by the on-device ONNX model. Used by the direct fallback
+ * path so NWP features are available even when the backend is unreachable.
+ * All operations are synchronous and must be called from a background thread.
+ */
+object NwpFetcher {
+
+    private const val TAG = "NwpFetcher"
+
+    data class Aggregates(
+        val capeMax: Double? = null,
+        val cinMax: Double? = null,
+        val pwatMax: Double? = null,
+        val srh03Max: Double? = null,
+        val liMin: Double? = null,
+        val lclMin: Double? = null,
+        val availableLeads: Double = 0.0,
+    )
+
+    /**
+     * Synchronously fetches NWP aggregates for [latitude]/[longitude].
+     * [currentTimeIso] is the ISO-8601 hour string from the Open-Meteo current
+     * response (e.g. "2026-05-04T15:00") used to locate the 3–6 h forecast window.
+     * Never throws — failures are logged and return an all-null [Aggregates].
+     */
+    fun fetchAggregates(
+        client: OkHttpClient,
+        latitude: Double,
+        longitude: Double,
+        currentTimeIso: String,
+    ): Aggregates {
+        return try {
+            val url = "https://api.open-meteo.com/v1/forecast" +
+                "?latitude=$latitude&longitude=$longitude" +
+                "&timezone=UTC" +
+                "&hourly=cape,convective_inhibition,precipitable_water," +
+                "storm_relative_helicity_0_to_3km,lifted_index,cloud_base" +
+                "&forecast_days=1"
+
+            val response = client.newCall(Request.Builder().url(url).build()).execute()
+            if (!response.isSuccessful) {
+                Log.w(TAG, "NWP fetch failed: HTTP ${response.code}")
+                return Aggregates()
+            }
+
+            val body = response.body?.string() ?: return Aggregates()
+            val hourly = JSONObject(body).optJSONObject("hourly") ?: return Aggregates()
+            val times = hourly.optJSONArray("time") ?: return Aggregates()
+
+            // Locate the current hour in the times array
+            var currentIndex = 0
+            for (i in 0 until times.length()) {
+                if (times.optString(i) == currentTimeIso) { currentIndex = i; break }
+            }
+
+            val start = minOf(currentIndex + 3, times.length())
+            val end   = minOf(currentIndex + 7, times.length())
+
+            fun finiteValues(key: String): List<Double> {
+                val arr = hourly.optJSONArray(key) ?: return emptyList()
+                return (start until end).mapNotNull { i ->
+                    arr.optDouble(i).takeUnless { it.isNaN() || it.isInfinite() }
+                }
+            }
+
+            val cape = finiteValues("cape")
+            val cin  = finiteValues("convective_inhibition")
+            val pwat = finiteValues("precipitable_water")
+            val srh  = finiteValues("storm_relative_helicity_0_to_3km")
+            val li   = finiteValues("lifted_index")
+            val lcl  = finiteValues("cloud_base")
+            val leads = listOf(cape.size, cin.size, pwat.size, srh.size, li.size, lcl.size)
+                .minOrNull()?.toDouble() ?: 0.0
+
+            Log.d(TAG, "\u2713 NWP aggregates fetched (leads=$leads)")
+            Aggregates(
+                capeMax        = cape.maxOrNull(),
+                cinMax         = cin.maxOrNull(),
+                pwatMax        = pwat.maxOrNull(),
+                srh03Max       = srh.maxOrNull(),
+                liMin          = li.minOrNull(),
+                lclMin         = lcl.minOrNull(),
+                availableLeads = leads,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "NWP fetch error: ${e.message}")
+            Aggregates()
+        }
+    }
+}

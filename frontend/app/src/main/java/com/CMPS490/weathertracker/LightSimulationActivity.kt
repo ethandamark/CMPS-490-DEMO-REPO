@@ -8,6 +8,7 @@ import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
 import com.CMPS490.weathertracker.ml.PredictionResult
+import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
 import com.CMPS490.weathertracker.network.BackendRetrofitInstance
 import com.CMPS490.weathertracker.sync.ModelInstanceSyncManager
@@ -83,6 +84,17 @@ class LightSimulationActivity : ComponentActivity() {
                 } else {
                     Log.d(TAG, "✓ Correctly produced no alert — tier ${result.alertState}")
                 }
+
+                // Update storm risk timeline in Room (replaces any previous prediction)
+                db.hourlyPredictionDao().deleteAll()
+                db.hourlyPredictionDao().upsert(
+                    HourlyPredictionEntity(
+                        timestamp = System.currentTimeMillis(),
+                        stormProbability = result.stormProbability,
+                        alertState = result.alertState,
+                        modelVersion = result.modelVersion,
+                    )
+                )
 
                 sendModelInstance(result)
 

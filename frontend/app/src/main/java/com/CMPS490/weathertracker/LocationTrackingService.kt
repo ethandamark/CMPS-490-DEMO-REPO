@@ -657,7 +657,16 @@ class LocationTrackingService : Service() {
                     }
                 }
             }
-            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
+            // Attach NWP aggregates so the model gets the same features as via the backend proxy
+            val nwp = NwpFetcher.fetchAggregates(httpClient, latitude, longitude, current.optString("time"))
+            nwp.capeMax?.let  { current.put("nwp_cape_f3_6_max",  it) }
+            nwp.cinMax?.let   { current.put("nwp_cin_f3_6_max",   it) }
+            nwp.pwatMax?.let  { current.put("nwp_pwat_f3_6_max",  it) }
+            nwp.srh03Max?.let { current.put("nwp_srh03_f3_6_max", it) }
+            nwp.liMin?.let    { current.put("nwp_li_f3_6_min",    it) }
+            nwp.lclMin?.let   { current.put("nwp_lcl_f3_6_min",   it) }
+            current.put("nwp_available_leads", nwp.availableLeads)
+            Log.d(TAG, "\u2713 Weather via direct Open-Meteo fallback (NWP leads=${nwp.availableLeads})")
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo direct fetch error: ${e.message}")

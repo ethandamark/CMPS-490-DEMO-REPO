@@ -96,6 +96,7 @@ import java.util.concurrent.atomic.AtomicReference
 import com.CMPS490.weathertracker.sync.SnapshotSyncManager
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 
@@ -521,13 +522,17 @@ class MainActivity : ComponentActivity() {
                     else -> ""
                 }
 
-                // Load storm risk timeline from Room DB
-                LaunchedEffect(storedDeviceId) {
-                    val deviceId = storedDeviceId ?: return@LaunchedEffect
+                // Keep storm risk timeline live: Room Flow re-emits whenever a new
+                // prediction is written (background service, simulation commands, etc.)
+                // so the timeline updates even while the app is in the foreground.
+                LaunchedEffect(Unit) {
                     val db = com.CMPS490.weathertracker.data.WeatherDatabase.getInstance(context)
-                    val nowMs = System.currentTimeMillis()
-                    val predictions = db.hourlyPredictionDao().getPredictionsFrom(nowMs - LocationTrackingService.MILLIS_PER_HOUR)
-                    stormRiskTimeline = predictions.map { it.timestamp to it.stormProbability }
+                    db.hourlyPredictionDao().observeAll().collect { all ->
+                        val cutoff = System.currentTimeMillis() - LocationTrackingService.MILLIS_PER_HOUR
+                        stormRiskTimeline = all
+                            .filter { it.timestamp >= cutoff }
+                            .map { it.timestamp to it.stormProbability }
+                    }
                 }
 
                 // Initialize WorkManager tasks

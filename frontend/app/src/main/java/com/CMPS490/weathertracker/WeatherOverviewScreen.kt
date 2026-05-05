@@ -56,7 +56,6 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
 private const val MAX_BAR_HEIGHT_DP = 48f
-private const val MIN_BAR_HEIGHT_DP = 4f
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -123,6 +122,12 @@ fun WeatherOverviewScreen(
                 }
             }
 
+            if (stormRiskTimeline.isNotEmpty()) {
+                item {
+                    StormRiskTimelineCard(stormRiskTimeline)
+                }
+            }
+
             item {
                 LiveRadarCard(userLocation, onLiveRadarClick)
             }
@@ -149,12 +154,6 @@ fun WeatherOverviewScreen(
 
             item {
                 RadarAttributionFooter()
-            }
-
-            if (stormRiskTimeline.isNotEmpty()) {
-                item {
-                    StormRiskTimelineCard(stormRiskTimeline)
-                }
             }
         }
     }
@@ -350,7 +349,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "STORM RISK TIMELINE",
+                text = "STORM RISK VISUAL DISPLAY",
                 style = MaterialTheme.typography.labelMedium,
                 color = palette.mutedText,
                 letterSpacing = 1.5.sp,
@@ -361,7 +360,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                timeline.takeLast(24).forEach { (timestamp, probability) ->
+                timeline.forEach { (timestamp, probability) ->
                     val tier = OnDevicePredictor.probabilityToTier(probability)
                     val barColor = when (tier) {
                         3    -> Color(0xFFD32F2F)                        // severe — deep red
@@ -369,18 +368,40 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                         1    -> MaterialTheme.colorScheme.primary         // light — blue
                         else -> MaterialTheme.colorScheme.surfaceVariant  // clear — gray
                     }
-                    val barHeight = (probability * MAX_BAR_HEIGHT_DP).coerceAtLeast(MIN_BAR_HEIGHT_DP)
+                    val tierLabel = when (tier) {
+                        3    -> "Severe"
+                        2    -> "Moderate"
+                        1    -> "Light"
+                        else -> "Clear"
+                    }
+                    // Yellow and gray have dark backgrounds in perception — use dark text for contrast
+                    val textOnBar = when (tier) {
+                        2    -> Color(0xFF1A1A1A)  // dark on yellow
+                        0    -> Color(0xFF3A3A3A)  // dark on gray
+                        else -> Color.White         // white on red / blue
+                    }
+                    val pctLabel = "${(probability * 100).toInt()}%"
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.weight(1f),
                     ) {
                         Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .height(barHeight.dp)
-                                .fillMaxWidth(0.6f)
+                                .height(MAX_BAR_HEIGHT_DP.dp)
+                                .fillMaxWidth(0.8f)
                                 .clip(RoundedCornerShape(2.dp))
                                 .background(barColor),
-                        )
+                        ) {
+                            Text(
+                                text = pctLabel,
+                                color = textOnBar,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = hourFormat.format(Date(timestamp)),
@@ -389,12 +410,19 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                             fontSize = 8.sp,
                             textAlign = TextAlign.Center,
                         )
+                        Text(
+                            text = tierLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = palette.mutedText,
+                            fontSize = 7.sp,
+                            textAlign = TextAlign.Center,
+                        )
                     }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Gray · Blue · Yellow · Orange · Red  —  Clear to Severe",
+                text = "Gray · Blue · Yellow · Red  —  Clear to Severe",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.mutedText,
                 textAlign = TextAlign.Center,
