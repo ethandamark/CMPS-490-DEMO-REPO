@@ -440,7 +440,7 @@ class LocationTrackingService : Service() {
                                 modelVersion = result.modelVersion,
                             )
                         )
-                        db.hourlyPredictionDao().pruneToLatest()
+                        db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
                         if (result.alertState >= 2) {
                             fireStormNotification(result.stormProbability)
@@ -547,7 +547,7 @@ class LocationTrackingService : Service() {
                             modelVersion = result.modelVersion,
                         )
                     )
-                    db.hourlyPredictionDao().pruneToLatest()
+                    db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
                     if (result.alertState >= 2) {
                         fireStormNotification(result.stormProbability)
@@ -947,7 +947,7 @@ class LocationTrackingService : Service() {
                             modelVersion = result.modelVersion,
                         )
                     )
-                    db.hourlyPredictionDao().pruneToLatest()
+                    db.hourlyPredictionDao().pruneOlderThan(nowMs - 48 * MILLIS_PER_HOUR)
 
                     if (result.alertState >= 2) {
                         fireStormNotification(result.stormProbability)
