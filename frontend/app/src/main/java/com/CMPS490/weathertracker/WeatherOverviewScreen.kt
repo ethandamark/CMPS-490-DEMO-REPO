@@ -217,7 +217,7 @@ private fun TempestStickyHeader() {
                                 .decoderFactory(SvgDecoder.Factory())
                                 .crossfade(true)
                                 .build(),
-                            contentDescription = "tempestAI logo",
+                            contentDescription = "TempestAI logo",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.size(40.dp)
                         )
@@ -225,7 +225,7 @@ private fun TempestStickyHeader() {
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "tempestAI",
+                            text = "TempestAI",
                             style = MaterialTheme.typography.headlineSmall,
                             color = palette.primaryText,
                             fontWeight = FontWeight.ExtraBold
