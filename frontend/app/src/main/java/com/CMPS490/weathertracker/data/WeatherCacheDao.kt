@@ -78,7 +78,8 @@ interface WeatherCacheDao {
     @Query(
         "DELETE FROM weather_cache " +
         "WHERE latitude BETWEEN :latMin AND :latMax " +
-        "AND longitude BETWEEN :lonMin AND :lonMax"
+        "AND longitude BETWEEN :lonMin AND :lonMax " +
+        "AND cache_id NOT IN (SELECT cache_id FROM offline_weather_snapshot)"
     )
     suspend fun deleteNear(
         latMin: Double,

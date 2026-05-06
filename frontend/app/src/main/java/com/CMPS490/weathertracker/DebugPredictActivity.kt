@@ -66,102 +66,44 @@ class DebugPredictActivity : ComponentActivity() {
                 val authService = AuthenticationService(this@DebugPredictActivity)
                 val deviceId = authService.getStoredDeviceId() ?: "debug-device"
 
-                // ── Resolve location from the most-recent snapshot ──────────────────
-                val lastSnapshot = db.offlineWeatherSnapshotDao()
-                    .getSnapshotsForDevice(deviceId, 1).firstOrNull()
-                val lat = lastSnapshot?.cache?.latitude ?: DEFAULT_LAT
-                val lon = lastSnapshot?.cache?.longitude ?: DEFAULT_LON
-
-                // ── Determine the current-hour bucket ───────────────────────────────
                 val nowMs = System.currentTimeMillis()
-                val hourMs = (nowMs / 3_600_000L) * 3_600_000L
-                val cacheId = ForecastFetcher.deterministicCacheId(lat, lon, hourMs, false)
 
-                // ── Use the existing snapshot for this hour if it exists; only fetch
-                //    fresh weather if no data has been written yet. This ensures the
-                //    debug command is deterministic with the 2 PM snapshot when run at
-                //    2:15 PM — identical inputs to the background hourly prediction. ──
-                val existingRow = db.weatherCacheDao().getByIds(listOf(cacheId)).firstOrNull()
-                val snapshotId: String
+                // ── Use real snapshots only — bypasses bounding-box contamination ───
+                // offline_weather_snapshot is only ever written by LocationTrackingService
+                // and seedHistoryIfNeeded. Simulation activities never insert here, so
+                // this query is guaranteed to return uncontaminated real observation data.
+                var realSnapshots = db.offlineWeatherSnapshotDao()
+                    .getSnapshotsForDevice(deviceId, 48)
 
-                if (existingRow != null) {
-                    Log.d(TAG, "✓ Reusing existing weather snapshot for ${hourMs} (temp=${existingRow.temp}°C, pressure=${existingRow.pressure}hPa)")
-                    snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
-                    // Ensure the snapshot row exists so SnapshotSyncWorker can find it
-                    val snapshotExists = db.offlineWeatherSnapshotDao()
+                if (realSnapshots.isEmpty()) {
+                    // First run — seed 24h history from backend, then re-query.
+                    Log.d(TAG, "No real snapshots found — seeding 24h history from backend...")
+                    seedHistoryIfNeeded(deviceId, DEFAULT_LAT, DEFAULT_LON, db)
+                    realSnapshots = db.offlineWeatherSnapshotDao()
                         .getSnapshotsForDevice(deviceId, 48)
-                        .any { it.snapshot.weatherId == snapshotId }
-                    if (!snapshotExists) {
-                        db.offlineWeatherSnapshotDao().upsertSnapshot(
-                            OfflineWeatherSnapshotEntity(
-                                weatherId = snapshotId,
-                                deviceId = deviceId,
-                                cacheId = cacheId,
-                                syncedAt = null,
-                                isCurrent = true,
-                            )
-                        )
-                        Log.d(TAG, "✓ Snapshot row created: $snapshotId")
-                    }
-                } else {
-                    // No data for this hour yet — fetch live and store it
-                    Log.d(TAG, "No snapshot for current hour, fetching live weather for ($lat, $lon)")
-                    val weatherData = fetchOpenMeteoWeather(lat, lon)
-                    if (weatherData == null) {
-                        Log.e(TAG, "Open-Meteo fetch failed")
-                        return@launch
-                    }
-                    val cacheEntity = WeatherCacheEntity(
-                        cacheId = cacheId,
-                        temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
-                        humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
-                        windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
-                        windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
-                        precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
-                        pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
-                        recordedAt = hourMs,
-                        latitude = lat,
-                        longitude = lon,
-                        isForecast = false,
-                        dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
-                        elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
-                        distToCoastKm = null,
-                        nwpCapeF36Max = weatherData.optDouble("nwp_cape_f3_6_max").takeUnless { it.isNaN() },
-                        nwpCinF36Max = weatherData.optDouble("nwp_cin_f3_6_max").takeUnless { it.isNaN() },
-                        nwpPwatF36Max = weatherData.optDouble("nwp_pwat_f3_6_max").takeUnless { it.isNaN() },
-                        nwpSrh03F36Max = weatherData.optDouble("nwp_srh03_f3_6_max").takeUnless { it.isNaN() },
-                        nwpLiF36Min = weatherData.optDouble("nwp_li_f3_6_min").takeUnless { it.isNaN() },
-                        nwpLclF36Min = weatherData.optDouble("nwp_lcl_f3_6_min").takeUnless { it.isNaN() },
-                        nwpAvailableLeads = weatherData.optDouble("nwp_available_leads").takeUnless { it.isNaN() },
-                        mrmsMaxDbz75km = weatherData.optDouble("mrms_max_dbz_75km").takeUnless { it.isNaN() },
-                    )
-                    db.weatherCacheDao().upsert(cacheEntity)
-                    Log.d(TAG, "✓ Weather cached: temp=${cacheEntity.temp}°C, humidity=${cacheEntity.humidity}%, pressure=${cacheEntity.pressure}hPa")
-
-                    snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
-                    val snapshotExists = db.offlineWeatherSnapshotDao()
-                        .getSnapshotsForDevice(deviceId, 48)
-                        .any { it.snapshot.weatherId == snapshotId }
-                    if (!snapshotExists) {
-                        db.offlineWeatherSnapshotDao().upsertSnapshot(
-                            OfflineWeatherSnapshotEntity(
-                                weatherId = snapshotId,
-                                deviceId = deviceId,
-                                cacheId = cacheId,
-                                syncedAt = null,
-                                isCurrent = true,
-                            )
-                        )
-                        Log.d(TAG, "✓ Snapshot created: $snapshotId")
-                    }
-
-                    // Seed 24h of historical data so the feature vector has enough
-                    // history for rolling aggregates on first run.
-                    seedHistoryIfNeeded(deviceId, lat, lon, db)
                 }
 
-                // ── Assemble features from Room (uses the snapshot just resolved) ───
-                val features = FeatureAssemblyService(db).assembleFeatures(lat, lon)
+                if (realSnapshots.isEmpty()) {
+                    Log.w(TAG, "No real snapshot data available after seeding — aborting")
+                    return@launch
+                }
+
+                val mostRecentSnapshot = realSnapshots.first()
+                val lat = mostRecentSnapshot.cache.latitude
+                val lon = mostRecentSnapshot.cache.longitude
+                val snapshotId = mostRecentSnapshot.snapshot.weatherId
+
+                Log.d(TAG, "✓ Using ${realSnapshots.size} real snapshots for features " +
+                    "(most recent: $snapshotId, recorded_at=${mostRecentSnapshot.cache.recordedAt})")
+
+                // Fetch the exact WeatherCacheEntity rows linked to these snapshots.
+                // Covers up to 48 rows = full 24h observation history + any seeded rows.
+                val cacheIds = realSnapshots.map { it.snapshot.cacheId }
+                val snapshotRows = db.weatherCacheDao().getByIds(cacheIds)
+                Log.d(TAG, "✓ Fetched ${snapshotRows.size} cache rows for feature assembly")
+
+                // ── Assemble features from exact snapshot rows (no bounding-box) ────
+                val features = FeatureAssemblyService(db).assembleFeaturesFromRows(snapshotRows, lat, lon)
                 if (features.isEmpty()) {
                     Log.w(TAG, "Feature assembly returned empty — no historical data")
                     return@launch
@@ -236,15 +178,11 @@ class DebugPredictActivity : ComponentActivity() {
         lon: Double,
         db: WeatherDatabase,
     ) {
-        val delta = 5.0 * 0.009
-        val existing = db.weatherCacheDao().getObservationsNear(
-            latMin = lat - delta,
-            latMax = lat + delta,
-            lonMin = lon - delta,
-            lonMax = lon + delta,
-        )
-        if (existing.size >= 12) {
-            Log.d(TAG, "⏭ Room DB already has ${existing.size} observations, skipping seed")
+        // Check snapshot-linked rows specifically — simulation rows in weather_cache are
+        // never inserted into offline_weather_snapshot and must not count as real history.
+        val existingSnapshots = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 48)
+        if (existingSnapshots.size >= 12) {
+            Log.d(TAG, "⏭ Room DB already has ${existingSnapshots.size} real snapshots, skipping seed")
             return
         }
 
