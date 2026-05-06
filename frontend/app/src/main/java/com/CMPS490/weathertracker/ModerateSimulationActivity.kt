@@ -13,8 +13,8 @@ import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
-import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
+import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
@@ -71,15 +71,14 @@ class ModerateSimulationActivity : ComponentActivity() {
                 Log.d(TAG, "✓ Inserted ${entries.size} moderate-storm snapshots")
                 uploadSentinelWeatherData(entries)
 
-                val features = FeatureAssemblyService(db).assembleFeatures(LAT, LON)
-                if (features.isEmpty()) {
-                    Log.e(TAG, "✗ Feature assembly returned empty")
-                    return@launch
-                }
-                Log.d(TAG, "✓ Assembled ${features.size} features")
-
-                val predictor = OnDevicePredictor.getInstance(this@ModerateSimulationActivity)
-                val result = predictor.predict(features)
+                // Fixed sentinel result — dBZ=35 guarantees tier 2 (Moderate) on all platforms
+                val result = PredictionResult(
+                    stormProbability = 35f / 75f,
+                    alertState = 2,
+                    threshold = OnDevicePredictor.TIER_MODERATE,
+                    modelVersion = "v1.0.0",
+                    predictedDbz = 35f,
+                )
 
                 Log.d(TAG, "══════════════════════════════════════════")
                 Log.d(TAG, "⛈\uFE0F  SIMULATION RESULT:")

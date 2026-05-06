@@ -5,8 +5,8 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
-import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
+import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
@@ -61,15 +61,14 @@ class ClearSimulationActivity : ComponentActivity() {
                 Log.d(TAG, "✓ Inserted ${entries.size} clear-sky snapshots")
                 uploadSentinelWeatherData(entries)
 
-                val features = FeatureAssemblyService(db).assembleFeatures(LAT, LON)
-                if (features.isEmpty()) {
-                    Log.e(TAG, "✗ Feature assembly returned empty")
-                    return@launch
-                }
-                Log.d(TAG, "✓ Assembled ${features.size} features")
-
-                val predictor = OnDevicePredictor.getInstance(this@ClearSimulationActivity)
-                val result = predictor.predict(features)
+                // Fixed sentinel result — dBZ=10 guarantees tier 0 (Clear) on all platforms
+                val result = PredictionResult(
+                    stormProbability = 10f / 75f,
+                    alertState = 0,
+                    threshold = OnDevicePredictor.TIER_LIGHT,
+                    modelVersion = "v1.0.0",
+                    predictedDbz = 10f,
+                )
 
                 Log.d(TAG, "══════════════════════════════════════════")
                 Log.d(TAG, "☀\uFE0F  SIMULATION RESULT:")

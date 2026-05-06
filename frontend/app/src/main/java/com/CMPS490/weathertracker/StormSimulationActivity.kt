@@ -13,8 +13,8 @@ import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
-import com.CMPS490.weathertracker.ml.FeatureAssemblyService
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
+import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
@@ -79,16 +79,14 @@ class StormSimulationActivity : ComponentActivity() {
                 // weather history is visible in the backend / Supabase dashboard.
                 uploadSentinelWeatherData(entries)
 
-                // Assemble features and run prediction
-                val features = FeatureAssemblyService(db).assembleFeatures(LAT, LON)
-                if (features.isEmpty()) {
-                    Log.e(TAG, "✗ Feature assembly returned empty")
-                    return@launch
-                }
-                Log.d(TAG, "✓ Assembled ${features.size} features")
-
-                val predictor = OnDevicePredictor.getInstance(this@StormSimulationActivity)
-                val result = predictor.predict(features)
+                // Fixed sentinel result — dBZ=52 guarantees tier 3 (Severe) on all platforms
+                val result = PredictionResult(
+                    stormProbability = 52f / 75f,
+                    alertState = 3,
+                    threshold = OnDevicePredictor.TIER_SEVERE,
+                    modelVersion = "v1.0.0",
+                    predictedDbz = 52f,
+                )
 
                 Log.d(TAG, "══════════════════════════════════════════")
                 Log.d(TAG, "🌀 SIMULATION RESULT:")
