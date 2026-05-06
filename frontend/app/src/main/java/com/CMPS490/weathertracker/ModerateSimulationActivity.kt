@@ -292,7 +292,7 @@ class ModerateSimulationActivity : ComponentActivity() {
                 ModelInstanceEntity(
                     instanceId = UUID.randomUUID().toString(),
                     deviceId = deviceId,
-                    version = "v1.0.0",
+                    version = "v2.0.0",
                     latitude = LAT,
                     longitude = LON,
                     resultLevel = result.alertState,

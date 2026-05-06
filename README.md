@@ -147,7 +147,7 @@ The model was trained offline using XGBoost + scikit-learn (saved as a joblib ar
 1. **Observation collection** — last 24 h of `weather_cache` rows from Room DB (max 24 records)
 2. **Feature assembly** — 26 base features: raw (5) · precipitation (4) · pressure (5) · wind/temp (5) · temporal (3) · static/geographic (4)
 3. **NWP passthrough** — 7 features direct from Open-Meteo: CAPE · CIN · PWAT · SRH03 · LI · LCL · `nwp_available` flag
-4. **ONNX inference + isotonic calibration** — `model.onnx` (v1.0.0) loaded via ONNX Runtime; raw probability mapped through a lookup table to a calibrated score
+4. **ONNX inference + isotonic calibration** — `model.onnx` (v2.0.0) loaded via ONNX Runtime; raw probability mapped through a lookup table to a calibrated score
 5. **Result storage** — `model_instance` written to Room DB and synced to Supabase hourly
 6. **Alert decision** — notification fires when calibrated probability ≥ 0.4901 or an active NWS alert exists for the area
 
