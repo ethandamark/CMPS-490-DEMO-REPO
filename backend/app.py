@@ -1630,7 +1630,7 @@ async def update_simulation_sentinel(request: SentinelWeatherDataRequest):
 # ============= MODEL INSTANCE =============
 
 class ModelInstanceRequest(BaseModel):
-    version: str = "v1.0.0"
+    version: str = "v2.0.0"
     latitude: float
     longitude: float
     result_level: int
@@ -1642,7 +1642,7 @@ class ModelInstanceRequest(BaseModel):
 
 class ModelInstanceBatchItem(BaseModel):
     instance_id: str
-    version: str = "v1.0.0"
+    version: str = "v2.0.0"
     latitude: float
     longitude: float
     result_level: int

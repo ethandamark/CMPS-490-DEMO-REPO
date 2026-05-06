@@ -96,6 +96,27 @@ class FeatureAssemblyService(private val db: WeatherDatabase) {
             dataSource = if (usableForecasts.isNotEmpty()) "observations+forecasts" else "observations"
         }
 
+        return buildFeatures(history, latitude, longitude, dataSource)
+    }
+
+    /**
+     * Build the feature vector directly from a pre-fetched list of [rows].
+     * Bypasses the bounding-box DB query — used by DebugPredictActivity to replay
+     * exactly the same inputs as the background hourly prediction without
+     * simulation row contamination.
+     */
+    fun assembleFeaturesFromRows(
+        rows: List<WeatherCacheEntity>,
+        latitude: Double,
+        longitude: Double,
+    ): Map<String, Float?> = buildFeatures(rows, latitude, longitude, "snapshot-linked")
+
+    private fun buildFeatures(
+        history: List<WeatherCacheEntity>,
+        latitude: Double,
+        longitude: Double,
+        dataSource: String,
+    ): Map<String, Float?> {
         if (history.isEmpty()) {
             Log.w(TAG, "No weather history found near ($latitude, $longitude)")
             return emptyMap()
