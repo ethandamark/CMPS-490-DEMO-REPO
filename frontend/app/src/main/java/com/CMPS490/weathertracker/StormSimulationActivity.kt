@@ -15,7 +15,6 @@ import com.CMPS490.weathertracker.data.WeatherCacheEntity
 import com.CMPS490.weathertracker.data.WeatherDatabase
 import com.CMPS490.weathertracker.ml.OnDevicePredictor
 import com.CMPS490.weathertracker.ml.PredictionResult
-import com.CMPS490.weathertracker.ml.PredictionResult
 import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
 import com.CMPS490.weathertracker.network.BackendRetrofitInstance
