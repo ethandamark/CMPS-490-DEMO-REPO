@@ -72,6 +72,43 @@ class DebugPredictActivity : ComponentActivity() {
                 // offline_weather_snapshot is only ever written by LocationTrackingService
                 // and seedHistoryIfNeeded. Simulation activities never insert here, so
                 // this query is guaranteed to return uncontaminated real observation data.
+                // ── Replay the most recent stored prediction for this device ─────────
+                // Simulation sentinel IDs (00000000-..., 10000000-..., etc.) are excluded
+                // so only real / seeded predictions are surfaced.
+                val recentInstance = db.modelInstanceDao().getMostRecentRealForDevice(deviceId)
+
+                if (recentInstance != null) {
+                    val storedDbz  = recentInstance.predictedDbz
+                        ?: (recentInstance.confidenceScore * 75f)
+                    val storedConf = recentInstance.confidenceScore
+                    val storedTier = recentInstance.resultLevel
+
+                    Log.d(TAG, "══════════════════════════════════════════")
+                    Log.d(TAG, "🤖 PREDICTION RESULT (stored):")
+                    Log.d(TAG, "   Predicted dBZ: $storedDbz")
+                    Log.d(TAG, "   Confidence:    $storedConf")
+                    Log.d(TAG, "   Alert State:   $storedTier (${OnDevicePredictor.tierToName(storedTier)})")
+                    Log.d(TAG, "   Source:        ${recentInstance.instanceId}")
+                    Log.d(TAG, "══════════════════════════════════════════")
+
+                    if (storedTier >= 2) {
+                        fireStormNotification(storedConf)
+                    }
+
+                    val predHourMs = (System.currentTimeMillis() / 3_600_000L) * 3_600_000L
+                    db.hourlyPredictionDao().upsert(
+                        HourlyPredictionEntity(
+                            timestamp = predHourMs,
+                            stormProbability = storedConf,
+                            alertState = storedTier,
+                            modelVersion = recentInstance.version,
+                        )
+                    )
+                    Log.d(TAG, "✓ Storm-risk UI updated (dBZ=$storedDbz, confidence=$storedConf)")
+                    return@launch
+                }
+
+                // ── No stored prediction — seed, assemble features, run ONNX ────────
                 var realSnapshots = db.offlineWeatherSnapshotDao()
                     .getSnapshotsForDevice(deviceId, 48)
 
@@ -114,11 +151,12 @@ class DebugPredictActivity : ComponentActivity() {
                 val predictor = OnDevicePredictor.getInstance(this@DebugPredictActivity)
                 val result = predictor.predict(features)
                 Log.d(TAG, "══════════════════════════════════════════")
-                Log.d(TAG, "🤖 PREDICTION RESULT:")
-                Log.d(TAG, "   Probability: ${result.stormProbability}")
-                Log.d(TAG, "   Alert State: ${result.alertState}")
-                Log.d(TAG, "   Threshold:   ${result.threshold}")
-                Log.d(TAG, "   Model:       ${result.modelVersion}")
+                Log.d(TAG, "🤖 PREDICTION RESULT (fresh):")
+                Log.d(TAG, "   Predicted dBZ: ${result.predictedDbz}")
+                Log.d(TAG, "   Confidence:    ${result.stormProbability}")
+                Log.d(TAG, "   Alert State:   ${result.alertState} (${OnDevicePredictor.tierToName(result.alertState)})")
+                Log.d(TAG, "   Threshold:     ${result.threshold}")
+                Log.d(TAG, "   Model:         ${result.modelVersion}")
                 Log.d(TAG, "══════════════════════════════════════════")
 
                 if (result.alertState >= 2) {
