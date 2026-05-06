@@ -52,10 +52,11 @@ logger = logging.getLogger(__name__)
 NWP_HOURLY_VARS = (
     "cape",
     "convective_inhibition",
-    "precipitable_water",
-    "storm_relative_helicity_0_to_3km",
+    "total_column_integrated_water_vapour",  # = precipitable water
     "lifted_index",
-    "cloud_base",
+    "temperature_2m",
+    "dew_point_2m",
+    # storm_relative_helicity_0_to_3km is not available in Open-Meteo forecast API
 )
 
 
@@ -85,20 +86,31 @@ def _add_nwp_aggregates(current: dict, hourly: dict) -> None:
     def values(name: str) -> list[float]:
         return _finite_values((hourly.get(name) or [])[window])
 
-    cape = values("cape")
-    cin = values("convective_inhibition")
-    pwat = values("precipitable_water")
-    srh03 = values("storm_relative_helicity_0_to_3km")
-    li = values("lifted_index")
-    lcl = values("cloud_base")
-    lead_counts = [len(cape), len(cin), len(pwat), len(srh03), len(li), len(lcl)]
+    cape  = values("cape")
+    cin   = values("convective_inhibition")
+    pwat  = values("total_column_integrated_water_vapour")
+    srh03: list[float] = []  # storm_relative_helicity not in Open-Meteo; imputed by model
+    li    = values("lifted_index")
 
-    current["nwp_cape_f3_6_max"] = max(cape) if cape else None
-    current["nwp_cin_f3_6_max"] = max(cin) if cin else None
-    current["nwp_pwat_f3_6_max"] = max(pwat) if pwat else None
+    # Derive LCL height (m) via LCL ≈ 125 * (T2m - Td2m).
+    # Both temperature_2m and dew_point_2m are valid Open-Meteo hourly variables.
+    t2m  = (hourly.get("temperature_2m") or [])[window]
+    td2m = (hourly.get("dew_point_2m")   or [])[window]
+    lcl  = _finite_values(
+        125.0 * (t - td)
+        for t, td in zip(t2m, td2m)
+        if isinstance(t, (int, float)) and isinstance(td, (int, float))
+        and isfinite(t) and isfinite(td)
+    )
+
+    lead_counts = [len(cape), len(cin), len(pwat), len(li), len(lcl)]
+
+    current["nwp_cape_f3_6_max"]  = max(cape) if cape else None
+    current["nwp_cin_f3_6_max"]   = max(cin)  if cin  else None
+    current["nwp_pwat_f3_6_max"]  = max(pwat) if pwat else None
     current["nwp_srh03_f3_6_max"] = max(srh03) if srh03 else None
-    current["nwp_li_f3_6_min"] = min(li) if li else None
-    current["nwp_lcl_f3_6_min"] = min(lcl) if lcl else None
+    current["nwp_li_f3_6_min"]    = min(li)   if li   else None
+    current["nwp_lcl_f3_6_min"]   = min(lcl)  if lcl  else None
     current["nwp_available_leads"] = float(min(lead_counts)) if any(lead_counts) else 0.0
 
 

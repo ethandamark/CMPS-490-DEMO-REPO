@@ -105,11 +105,11 @@ class StormSimulationActivity : ComponentActivity() {
                     Log.w(TAG, "⚠ Model did NOT trigger alert — probability below threshold")
                 }
 
-                // Update storm risk timeline in Room (replaces any previous prediction)
-                db.hourlyPredictionDao().deleteAll()
+                // Update storm risk visual display in Room
+                val predHourMs = (System.currentTimeMillis() / 3_600_000L) * 3_600_000L
                 db.hourlyPredictionDao().upsert(
                     HourlyPredictionEntity(
-                        timestamp = System.currentTimeMillis(),
+                        timestamp = predHourMs,
                         stormProbability = result.stormProbability,
                         alertState = result.alertState,
                         modelVersion = result.modelVersion,

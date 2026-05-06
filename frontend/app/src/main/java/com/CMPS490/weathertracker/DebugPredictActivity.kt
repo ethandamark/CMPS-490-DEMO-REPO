@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
 import com.CMPS490.weathertracker.data.ForecastFetcher
+import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
 import com.CMPS490.weathertracker.data.OfflineWeatherSnapshotEntity
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
@@ -64,28 +65,52 @@ class DebugPredictActivity : ComponentActivity() {
                 val db = WeatherDatabase.getInstance(this@DebugPredictActivity)
                 val authService = AuthenticationService(this@DebugPredictActivity)
                 val deviceId = authService.getStoredDeviceId() ?: "debug-device"
-                val lastSnapshot = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 1).firstOrNull()
+
+                // ── Resolve location from the most-recent snapshot ──────────────────
+                val lastSnapshot = db.offlineWeatherSnapshotDao()
+                    .getSnapshotsForDevice(deviceId, 1).firstOrNull()
                 val lat = lastSnapshot?.cache?.latitude ?: DEFAULT_LAT
                 val lon = lastSnapshot?.cache?.longitude ?: DEFAULT_LON
-                Log.d(TAG, "Fetching weather for ($lat, $lon)${if (lastSnapshot != null) " [last known location]" else " [fallback default]"}")
 
-                val weatherData = fetchOpenMeteoWeather(lat, lon)
-                if (weatherData == null) {
-                    Log.e(TAG, "Open-Meteo fetch failed")
-                    return@launch
-                }
-
+                // ── Determine the current-hour bucket ───────────────────────────────
                 val nowMs = System.currentTimeMillis()
                 val hourMs = (nowMs / 3_600_000L) * 3_600_000L
                 val cacheId = ForecastFetcher.deterministicCacheId(lat, lon, hourMs, false)
 
-                // Only upsert the weather row if it doesn't already exist.
-                // The upsert DAO uses INSERT OR REPLACE, which DELETEs the old row first.
-                // That delete cascades to offline_weather_snapshot, removing the snapshot
-                // LocationTrackingService wrote — which would prevent the hourly prediction's
-                // model instance from ever being synced.
+                // ── Use the existing snapshot for this hour if it exists; only fetch
+                //    fresh weather if no data has been written yet. This ensures the
+                //    debug command is deterministic with the 2 PM snapshot when run at
+                //    2:15 PM — identical inputs to the background hourly prediction. ──
                 val existingRow = db.weatherCacheDao().getByIds(listOf(cacheId)).firstOrNull()
-                if (existingRow == null) {
+                val snapshotId: String
+
+                if (existingRow != null) {
+                    Log.d(TAG, "✓ Reusing existing weather snapshot for ${hourMs} (temp=${existingRow.temp}°C, pressure=${existingRow.pressure}hPa)")
+                    snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
+                    // Ensure the snapshot row exists so SnapshotSyncWorker can find it
+                    val snapshotExists = db.offlineWeatherSnapshotDao()
+                        .getSnapshotsForDevice(deviceId, 48)
+                        .any { it.snapshot.weatherId == snapshotId }
+                    if (!snapshotExists) {
+                        db.offlineWeatherSnapshotDao().upsertSnapshot(
+                            OfflineWeatherSnapshotEntity(
+                                weatherId = snapshotId,
+                                deviceId = deviceId,
+                                cacheId = cacheId,
+                                syncedAt = null,
+                                isCurrent = true,
+                            )
+                        )
+                        Log.d(TAG, "✓ Snapshot row created: $snapshotId")
+                    }
+                } else {
+                    // No data for this hour yet — fetch live and store it
+                    Log.d(TAG, "No snapshot for current hour, fetching live weather for ($lat, $lon)")
+                    val weatherData = fetchOpenMeteoWeather(lat, lon)
+                    if (weatherData == null) {
+                        Log.e(TAG, "Open-Meteo fetch failed")
+                        return@launch
+                    }
                     val cacheEntity = WeatherCacheEntity(
                         cacheId = cacheId,
                         temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
@@ -112,37 +137,30 @@ class DebugPredictActivity : ComponentActivity() {
                     )
                     db.weatherCacheDao().upsert(cacheEntity)
                     Log.d(TAG, "✓ Weather cached: temp=${cacheEntity.temp}°C, humidity=${cacheEntity.humidity}%, pressure=${cacheEntity.pressure}hPa")
-                } else {
-                    Log.d(TAG, "✓ Weather already cached for this hour (preserving hourly loop snapshot)")
-                }
 
-                // Create offline_weather_snapshot if it doesn't already exist.
-                // SnapshotSyncWorker only pushes rows that exist here, so without this
-                // the sync chain never fires and neither snapshots nor model instances
-                // reach the backend.
-                val snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
-                val snapshotExists = db.offlineWeatherSnapshotDao()
-                    .getSnapshotsForDevice(deviceId, 48)
-                    .any { it.snapshot.weatherId == snapshotId }
-                if (!snapshotExists) {
-                    db.offlineWeatherSnapshotDao().upsertSnapshot(
-                        OfflineWeatherSnapshotEntity(
-                            weatherId = snapshotId,
-                            deviceId = deviceId,
-                            cacheId = cacheId,
-                            syncedAt = null,
-                            isCurrent = true,
+                    snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
+                    val snapshotExists = db.offlineWeatherSnapshotDao()
+                        .getSnapshotsForDevice(deviceId, 48)
+                        .any { it.snapshot.weatherId == snapshotId }
+                    if (!snapshotExists) {
+                        db.offlineWeatherSnapshotDao().upsertSnapshot(
+                            OfflineWeatherSnapshotEntity(
+                                weatherId = snapshotId,
+                                deviceId = deviceId,
+                                cacheId = cacheId,
+                                syncedAt = null,
+                                isCurrent = true,
+                            )
                         )
-                    )
-                    Log.d(TAG, "✓ Snapshot created: $snapshotId")
-                } else {
-                    Log.d(TAG, "✓ Snapshot already exists: $snapshotId")
+                        Log.d(TAG, "✓ Snapshot created: $snapshotId")
+                    }
+
+                    // Seed 24h of historical data so the feature vector has enough
+                    // history for rolling aggregates on first run.
+                    seedHistoryIfNeeded(deviceId, lat, lon, db)
                 }
 
-                // Seed 24h of historical data on first run so the feature vector
-                // has enough history for rolling aggregates (pressure changes, precip sums, etc.).
-                seedHistoryIfNeeded(deviceId, lat, lon, db)
-
+                // ── Assemble features from Room (uses the snapshot just resolved) ───
                 val features = FeatureAssemblyService(db).assembleFeatures(lat, lon)
                 if (features.isEmpty()) {
                     Log.w(TAG, "Feature assembly returned empty — no historical data")
@@ -150,6 +168,7 @@ class DebugPredictActivity : ComponentActivity() {
                 }
                 Log.d(TAG, "✓ Assembled ${features.size} features")
 
+                // ── Run prediction ───────────────────────────────────────────────────
                 val predictor = OnDevicePredictor.getInstance(this@DebugPredictActivity)
                 val result = predictor.predict(features)
                 Log.d(TAG, "══════════════════════════════════════════")
@@ -164,9 +183,18 @@ class DebugPredictActivity : ComponentActivity() {
                     fireStormNotification(result.stormProbability)
                 }
 
-                // Store in Room — SnapshotSyncWorker pushes the snapshot first,
-                // then ModelInstanceSyncWorker pushes the model instance once the
-                // snapshot FK is satisfied in Supabase.
+                // ── Update storm risk visual display ───────────────────────────────
+                val predHourMs = (System.currentTimeMillis() / 3_600_000L) * 3_600_000L
+                db.hourlyPredictionDao().upsert(
+                    HourlyPredictionEntity(
+                        timestamp = predHourMs,
+                        stormProbability = result.stormProbability,
+                        alertState = result.alertState,
+                        modelVersion = result.modelVersion,
+                    )
+                )
+
+                // ── Persist model instance for Supabase sync ─────────────────────────
                 val resultType = OnDevicePredictor.tierToName(result.alertState)
                 db.modelInstanceDao().upsert(
                     ModelInstanceEntity(

@@ -200,8 +200,9 @@ object NwpFetcher {
             val url = "https://api.open-meteo.com/v1/forecast" +
                 "?latitude=$latitude&longitude=$longitude" +
                 "&timezone=UTC" +
-                "&hourly=cape,convective_inhibition,precipitable_water," +
-                "storm_relative_helicity_0_to_3km,lifted_index,cloud_base" +
+                "&hourly=cape,convective_inhibition," +
+                "total_column_integrated_water_vapour," +
+                "lifted_index,temperature_2m,dew_point_2m" +
                 "&forecast_days=1"
 
             val response = client.newCall(Request.Builder().url(url).build()).execute()
@@ -232,11 +233,24 @@ object NwpFetcher {
 
             val cape = finiteValues("cape")
             val cin  = finiteValues("convective_inhibition")
-            val pwat = finiteValues("precipitable_water")
-            val srh  = finiteValues("storm_relative_helicity_0_to_3km")
+            val pwat = finiteValues("total_column_integrated_water_vapour")
+            // storm_relative_helicity_0_to_3km not in Open-Meteo; model uses imputed median
             val li   = finiteValues("lifted_index")
-            val lcl  = finiteValues("cloud_base")
-            val leads = listOf(cape.size, cin.size, pwat.size, srh.size, li.size, lcl.size)
+
+            // Derive LCL height (m) via LCL ≈ 125 * (T2m - Td2m)
+            val t2m  = hourly.optJSONArray("temperature_2m")
+            val td2m = hourly.optJSONArray("dew_point_2m")
+            val lcl: List<Double> = if (t2m != null && td2m != null) {
+                (start until end).mapNotNull { i ->
+                    val t  = t2m.optDouble(i)
+                    val td = td2m.optDouble(i)
+                    if (!t.isNaN() && !t.isInfinite() && !td.isNaN() && !td.isInfinite())
+                        125.0 * (t - td)
+                    else null
+                }
+            } else emptyList()
+
+            val leads = listOf(cape.size, cin.size, pwat.size, li.size, lcl.size)
                 .minOrNull()?.toDouble() ?: 0.0
 
             Log.d(TAG, "\u2713 NWP aggregates fetched (leads=$leads)")
@@ -244,7 +258,7 @@ object NwpFetcher {
                 capeMax        = cape.maxOrNull(),
                 cinMax         = cin.maxOrNull(),
                 pwatMax        = pwat.maxOrNull(),
-                srh03Max       = srh.maxOrNull(),
+                srh03Max       = null,  // not available in Open-Meteo; imputed by model
                 liMin          = li.minOrNull(),
                 lclMin         = lcl.minOrNull(),
                 availableLeads = leads,
