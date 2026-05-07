@@ -4,12 +4,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
 import com.CMPS490.weathertracker.data.ForecastFetcher
+import com.CMPS490.weathertracker.data.HourlyPredictionEntity
 import com.CMPS490.weathertracker.data.ModelInstanceEntity
 import com.CMPS490.weathertracker.data.OfflineWeatherSnapshotEntity
 import com.CMPS490.weathertracker.data.WeatherCacheEntity
@@ -62,110 +65,117 @@ class DebugPredictActivity : ComponentActivity() {
                 val db = WeatherDatabase.getInstance(this@DebugPredictActivity)
                 val authService = AuthenticationService(this@DebugPredictActivity)
                 val deviceId = authService.getStoredDeviceId() ?: "debug-device"
-                val lastSnapshot = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 1).firstOrNull()
-                val lat = lastSnapshot?.cache?.latitude ?: DEFAULT_LAT
-                val lon = lastSnapshot?.cache?.longitude ?: DEFAULT_LON
-                Log.d(TAG, "Fetching weather for ($lat, $lon)${if (lastSnapshot != null) " [last known location]" else " [fallback default]"}")
 
-                val weatherData = fetchOpenMeteoWeather(lat, lon)
-                if (weatherData == null) {
-                    Log.e(TAG, "Open-Meteo fetch failed")
+                val nowMs = System.currentTimeMillis()
+
+                // ── Use real snapshots only — bypasses bounding-box contamination ───
+                // offline_weather_snapshot is only ever written by LocationTrackingService
+                // and seedHistoryIfNeeded. Simulation activities never insert here, so
+                // this query is guaranteed to return uncontaminated real observation data.
+                // ── Replay the most recent stored prediction for this device ─────────
+                // Simulation sentinel IDs (00000000-..., 10000000-..., etc.) are excluded
+                // so only real / seeded predictions are surfaced.
+                val recentInstance = db.modelInstanceDao().getMostRecentRealForDevice(deviceId)
+
+                if (recentInstance != null) {
+                    val storedDbz  = recentInstance.predictedDbz
+                        ?: (recentInstance.confidenceScore * 75f)
+                    val storedConf = recentInstance.confidenceScore
+                    val storedTier = recentInstance.resultLevel
+
+                    Log.d(TAG, "══════════════════════════════════════════")
+                    Log.d(TAG, "🤖 PREDICTION RESULT (stored):")
+                    Log.d(TAG, "   Predicted dBZ: $storedDbz")
+                    Log.d(TAG, "   Confidence:    $storedConf")
+                    Log.d(TAG, "   Alert State:   $storedTier (${OnDevicePredictor.tierToName(storedTier)})")
+                    Log.d(TAG, "   Source:        ${recentInstance.instanceId}")
+                    Log.d(TAG, "══════════════════════════════════════════")
+
+                    if (storedTier >= 2) {
+                        fireStormNotification(storedConf)
+                    }
+
+                    val predHourMs = (System.currentTimeMillis() / 3_600_000L) * 3_600_000L
+                    db.hourlyPredictionDao().upsert(
+                        HourlyPredictionEntity(
+                            timestamp = predHourMs,
+                            stormProbability = storedConf,
+                            alertState = storedTier,
+                            modelVersion = recentInstance.version,
+                        )
+                    )
+                    Log.d(TAG, "✓ Storm-risk UI updated (dBZ=$storedDbz, confidence=$storedConf)")
                     return@launch
                 }
 
-                val nowMs = System.currentTimeMillis()
-                val hourMs = (nowMs / 3_600_000L) * 3_600_000L
-                val cacheId = ForecastFetcher.deterministicCacheId(lat, lon, hourMs, false)
-
-                // Only upsert the weather row if it doesn't already exist.
-                // The upsert DAO uses INSERT OR REPLACE, which DELETEs the old row first.
-                // That delete cascades to offline_weather_snapshot, removing the snapshot
-                // LocationTrackingService wrote — which would prevent the hourly prediction's
-                // model instance from ever being synced.
-                val existingRow = db.weatherCacheDao().getByIds(listOf(cacheId)).firstOrNull()
-                if (existingRow == null) {
-                    val cacheEntity = WeatherCacheEntity(
-                        cacheId = cacheId,
-                        temp = weatherData.optDouble("temperature_2m").takeUnless { it.isNaN() },
-                        humidity = weatherData.optDouble("relative_humidity_2m").takeUnless { it.isNaN() },
-                        windSpeed = weatherData.optDouble("wind_speed_10m").takeUnless { it.isNaN() },
-                        windDirection = weatherData.optDouble("wind_direction_10m").takeUnless { it.isNaN() },
-                        precipitationAmount = weatherData.optDouble("precipitation").takeUnless { it.isNaN() },
-                        pressure = weatherData.optDouble("pressure_msl").takeUnless { it.isNaN() },
-                        recordedAt = hourMs,
-                        latitude = lat,
-                        longitude = lon,
-                        isForecast = false,
-                        dewPointC = weatherData.optDouble("dew_point_2m").takeUnless { it.isNaN() },
-                        elevation = weatherData.optDouble("elevation").takeUnless { it.isNaN() },
-                        distToCoastKm = null,
-                        nwpCapeF36Max = null,
-                        nwpCinF36Max = null,
-                        nwpPwatF36Max = null,
-                        nwpSrh03F36Max = null,
-                        nwpLiF36Min = null,
-                        nwpLclF36Min = null,
-                        nwpAvailableLeads = null,
-                        mrmsMaxDbz75km = null,
-                    )
-                    db.weatherCacheDao().upsert(cacheEntity)
-                    Log.d(TAG, "✓ Weather cached: temp=${cacheEntity.temp}°C, humidity=${cacheEntity.humidity}%, pressure=${cacheEntity.pressure}hPa")
-                } else {
-                    Log.d(TAG, "✓ Weather already cached for this hour (preserving hourly loop snapshot)")
-                }
-
-                // Create offline_weather_snapshot if it doesn't already exist.
-                // SnapshotSyncWorker only pushes rows that exist here, so without this
-                // the sync chain never fires and neither snapshots nor model instances
-                // reach the backend.
-                val snapshotId = ForecastFetcher.deterministicSnapshotId(cacheId)
-                val snapshotExists = db.offlineWeatherSnapshotDao()
+                // ── No stored prediction — seed, assemble features, run ONNX ────────
+                var realSnapshots = db.offlineWeatherSnapshotDao()
                     .getSnapshotsForDevice(deviceId, 48)
-                    .any { it.snapshot.weatherId == snapshotId }
-                if (!snapshotExists) {
-                    db.offlineWeatherSnapshotDao().upsertSnapshot(
-                        OfflineWeatherSnapshotEntity(
-                            weatherId = snapshotId,
-                            deviceId = deviceId,
-                            cacheId = cacheId,
-                            syncedAt = null,
-                            isCurrent = true,
-                        )
-                    )
-                    Log.d(TAG, "✓ Snapshot created: $snapshotId")
-                } else {
-                    Log.d(TAG, "✓ Snapshot already exists: $snapshotId")
+
+                if (realSnapshots.isEmpty()) {
+                    // First run — seed 24h history from backend, then re-query.
+                    Log.d(TAG, "No real snapshots found — seeding 24h history from backend...")
+                    seedHistoryIfNeeded(deviceId, DEFAULT_LAT, DEFAULT_LON, db)
+                    realSnapshots = db.offlineWeatherSnapshotDao()
+                        .getSnapshotsForDevice(deviceId, 48)
                 }
 
-                // Seed 24h of historical data on first run so the feature vector
-                // has enough history for rolling aggregates (pressure changes, precip sums, etc.).
-                seedHistoryIfNeeded(deviceId, lat, lon, db)
+                if (realSnapshots.isEmpty()) {
+                    Log.w(TAG, "No real snapshot data available after seeding — aborting")
+                    return@launch
+                }
 
-                val features = FeatureAssemblyService(db).assembleFeatures(lat, lon)
+                val mostRecentSnapshot = realSnapshots.first()
+                val lat = mostRecentSnapshot.cache.latitude
+                val lon = mostRecentSnapshot.cache.longitude
+                val snapshotId = mostRecentSnapshot.snapshot.weatherId
+
+                Log.d(TAG, "✓ Using ${realSnapshots.size} real snapshots for features " +
+                    "(most recent: $snapshotId, recorded_at=${mostRecentSnapshot.cache.recordedAt})")
+
+                // Fetch the exact WeatherCacheEntity rows linked to these snapshots.
+                // Covers up to 48 rows = full 24h observation history + any seeded rows.
+                val cacheIds = realSnapshots.map { it.snapshot.cacheId }
+                val snapshotRows = db.weatherCacheDao().getByIds(cacheIds)
+                Log.d(TAG, "✓ Fetched ${snapshotRows.size} cache rows for feature assembly")
+
+                // ── Assemble features from exact snapshot rows (no bounding-box) ────
+                val features = FeatureAssemblyService(db).assembleFeaturesFromRows(snapshotRows, lat, lon)
                 if (features.isEmpty()) {
                     Log.w(TAG, "Feature assembly returned empty — no historical data")
                     return@launch
                 }
                 Log.d(TAG, "✓ Assembled ${features.size} features")
 
+                // ── Run prediction ───────────────────────────────────────────────────
                 val predictor = OnDevicePredictor.getInstance(this@DebugPredictActivity)
                 val result = predictor.predict(features)
                 Log.d(TAG, "══════════════════════════════════════════")
-                Log.d(TAG, "🤖 PREDICTION RESULT:")
-                Log.d(TAG, "   Probability: ${result.stormProbability}")
-                Log.d(TAG, "   Alert State: ${result.alertState}")
-                Log.d(TAG, "   Threshold:   ${result.threshold}")
-                Log.d(TAG, "   Model:       ${result.modelVersion}")
+                Log.d(TAG, "🤖 PREDICTION RESULT (fresh):")
+                Log.d(TAG, "   Predicted dBZ: ${result.predictedDbz}")
+                Log.d(TAG, "   Confidence:    ${result.stormProbability}")
+                Log.d(TAG, "   Alert State:   ${result.alertState} (${OnDevicePredictor.tierToName(result.alertState)})")
+                Log.d(TAG, "   Threshold:     ${result.threshold}")
+                Log.d(TAG, "   Model:         ${result.modelVersion}")
                 Log.d(TAG, "══════════════════════════════════════════")
 
-                if (result.alertState == 1) {
+                if (result.alertState >= 2) {
                     fireStormNotification(result.stormProbability)
                 }
 
-                // Store in Room — SnapshotSyncWorker pushes the snapshot first,
-                // then ModelInstanceSyncWorker pushes the model instance once the
-                // snapshot FK is satisfied in Supabase.
-                val resultType = if (result.alertState == 1) "storm" else "clear"
+                // ── Update storm risk visual display ───────────────────────────────
+                val predHourMs = (System.currentTimeMillis() / 3_600_000L) * 3_600_000L
+                db.hourlyPredictionDao().upsert(
+                    HourlyPredictionEntity(
+                        timestamp = predHourMs,
+                        stormProbability = result.stormProbability,
+                        alertState = result.alertState,
+                        modelVersion = result.modelVersion,
+                    )
+                )
+
+                // ── Persist model instance for Supabase sync ─────────────────────────
+                val resultType = OnDevicePredictor.tierToName(result.alertState)
                 db.modelInstanceDao().upsert(
                     ModelInstanceEntity(
                         instanceId = java.util.UUID.randomUUID().toString(),
@@ -178,6 +188,7 @@ class DebugPredictActivity : ComponentActivity() {
                         confidenceScore = result.stormProbability,
                         createdAt = nowMs,
                         weatherId = snapshotId,
+                        predictedDbz = result.predictedDbz,
                     )
                 )
                 Log.d(TAG, "✓ Model instance stored in Room (alertState=${result.alertState}, confidence=${result.stormProbability})")
@@ -205,15 +216,11 @@ class DebugPredictActivity : ComponentActivity() {
         lon: Double,
         db: WeatherDatabase,
     ) {
-        val delta = 5.0 * 0.009
-        val existing = db.weatherCacheDao().getObservationsNear(
-            latMin = lat - delta,
-            latMax = lat + delta,
-            lonMin = lon - delta,
-            lonMax = lon + delta,
-        )
-        if (existing.size >= 12) {
-            Log.d(TAG, "⏭ Room DB already has ${existing.size} observations, skipping seed")
+        // Check snapshot-linked rows specifically — simulation rows in weather_cache are
+        // never inserted into offline_weather_snapshot and must not count as real history.
+        val existingSnapshots = db.offlineWeatherSnapshotDao().getSnapshotsForDevice(deviceId, 48)
+        if (existingSnapshots.size >= 12) {
+            Log.d(TAG, "⏭ Room DB already has ${existingSnapshots.size} real snapshots, skipping seed")
             return
         }
 
@@ -267,13 +274,13 @@ class DebugPredictActivity : ComponentActivity() {
                     dewPointC = row.optDouble("dew_point_c").takeUnless { it.isNaN() },
                     elevation = row.optDouble("elevation").takeUnless { it.isNaN() },
                     distToCoastKm = null,
-                    nwpCapeF36Max = null,
-                    nwpCinF36Max = null,
-                    nwpPwatF36Max = null,
-                    nwpSrh03F36Max = null,
-                    nwpLiF36Min = null,
-                    nwpLclF36Min = null,
-                    nwpAvailableLeads = null,
+                    nwpCapeF36Max = row.optDouble("nwp_cape_f3_6_max").takeUnless { it.isNaN() },
+                    nwpCinF36Max = row.optDouble("nwp_cin_f3_6_max").takeUnless { it.isNaN() },
+                    nwpPwatF36Max = row.optDouble("nwp_pwat_f3_6_max").takeUnless { it.isNaN() },
+                    nwpSrh03F36Max = row.optDouble("nwp_srh03_f3_6_max").takeUnless { it.isNaN() },
+                    nwpLiF36Min = row.optDouble("nwp_li_f3_6_min").takeUnless { it.isNaN() },
+                    nwpLclF36Min = row.optDouble("nwp_lcl_f3_6_min").takeUnless { it.isNaN() },
+                    nwpAvailableLeads = row.optDouble("nwp_available_leads").takeUnless { it.isNaN() },
                     mrmsMaxDbz75km = null,
                 ))
 
@@ -350,7 +357,16 @@ class DebugPredictActivity : ComponentActivity() {
                     }
                 }
             }
-            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
+            // Attach NWP aggregates so the model gets the same features as via the backend proxy
+            val nwp = NwpFetcher.fetchAggregates(httpClient, latitude, longitude, current.optString("time"))
+            nwp.capeMax?.let  { current.put("nwp_cape_f3_6_max",  it) }
+            nwp.cinMax?.let   { current.put("nwp_cin_f3_6_max",   it) }
+            nwp.pwatMax?.let  { current.put("nwp_pwat_f3_6_max",  it) }
+            nwp.srh03Max?.let { current.put("nwp_srh03_f3_6_max", it) }
+            nwp.liMin?.let    { current.put("nwp_li_f3_6_min",    it) }
+            nwp.lclMin?.let   { current.put("nwp_lcl_f3_6_min",   it) }
+            current.put("nwp_available_leads", nwp.availableLeads)
+            Log.d(TAG, "\u2713 Weather via direct Open-Meteo fallback (NWP leads=${nwp.availableLeads})")
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo error: ${e.message}")
@@ -359,12 +375,20 @@ class DebugPredictActivity : ComponentActivity() {
     }
 
     private fun fireStormNotification(probability: Float) {
-        val channelId = "storm_alert_channel"
+        val channelId = "storm_alert_channel_v2"
         val nm = getSystemService(NotificationManager::class.java)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val channel = NotificationChannel(channelId, "Storm Alerts", NotificationManager.IMPORTANCE_HIGH)
-                .apply { description = "On-device storm probability alerts" }
+                .apply {
+                    description = "On-device storm probability alerts"
+                    setSound(soundUri, audioAttr)
+                }
             nm.createNotificationChannel(channel)
         }
 
@@ -374,13 +398,19 @@ class DebugPredictActivity : ComponentActivity() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        val tier = OnDevicePredictor.probabilityToTier(probability)
+        val (notifTitle, notifText) = when (tier) {
+            3    -> "🚨 Severe Storm Warning" to "Severe conditions detected — ${(probability * 100).toInt()}% storm intensity"
+            else -> "⚠️ Storm Risk Detected" to "Moderate rain likely — ${(probability * 100).toInt()}% storm intensity"
+        }
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("⚠️ Storm Risk Detected")
-            .setContentText("On-device model: ${(probability * 100).toInt()}% storm probability")
+            .setContentTitle(notifTitle)
+            .setContentText(notifText)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND)
             .build()
 
         nm.notify(2001, notification)

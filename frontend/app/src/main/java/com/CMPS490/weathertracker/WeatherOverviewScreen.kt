@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerTheme
 import com.CMPS490.weathertracker.ui.theme.WeatherTrackerThemeState
+import com.CMPS490.weathertracker.ml.OnDevicePredictor
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MapStyleOptions
@@ -54,9 +55,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 
-private const val STORM_ALERT_THRESHOLD = 0.4901f
 private const val MAX_BAR_HEIGHT_DP = 48f
-private const val MIN_BAR_HEIGHT_DP = 4f
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -123,6 +122,12 @@ fun WeatherOverviewScreen(
                 }
             }
 
+            if (stormRiskTimeline.isNotEmpty()) {
+                item {
+                    StormRiskTimelineCard(stormRiskTimeline)
+                }
+            }
+
             item {
                 LiveRadarCard(userLocation, onLiveRadarClick)
             }
@@ -149,12 +154,6 @@ fun WeatherOverviewScreen(
 
             item {
                 RadarAttributionFooter()
-            }
-
-            if (stormRiskTimeline.isNotEmpty()) {
-                item {
-                    StormRiskTimelineCard(stormRiskTimeline)
-                }
             }
         }
     }
@@ -218,7 +217,7 @@ private fun TempestStickyHeader() {
                                 .decoderFactory(SvgDecoder.Factory())
                                 .crossfade(true)
                                 .build(),
-                            contentDescription = "tempestAI logo",
+                            contentDescription = "TempestAI logo",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.size(40.dp)
                         )
@@ -226,7 +225,7 @@ private fun TempestStickyHeader() {
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "tempestAI",
+                            text = "TempestAI",
                             style = MaterialTheme.typography.headlineSmall,
                             color = palette.primaryText,
                             fontWeight = FontWeight.ExtraBold
@@ -350,7 +349,7 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "STORM RISK TIMELINE",
+                text = "STORM RISK VISUAL DISPLAY",
                 style = MaterialTheme.typography.labelMedium,
                 color = palette.mutedText,
                 letterSpacing = 1.5.sp,
@@ -361,21 +360,48 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                timeline.takeLast(24).forEach { (timestamp, probability) ->
-                    val isAlert = probability >= STORM_ALERT_THRESHOLD
-                    val barColor = if (isAlert) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                    val barHeight = (probability * MAX_BAR_HEIGHT_DP).coerceAtLeast(MIN_BAR_HEIGHT_DP)
+                timeline.forEach { (timestamp, probability) ->
+                    val tier = OnDevicePredictor.probabilityToTier(probability)
+                    val barColor = when (tier) {
+                        3    -> Color(0xFFD32F2F)                        // severe — deep red
+                        2    -> Color(0xFFFFD600)                        // moderate — yellow
+                        1    -> MaterialTheme.colorScheme.primary         // light — blue
+                        else -> MaterialTheme.colorScheme.surfaceVariant  // clear — gray
+                    }
+                    val tierLabel = when (tier) {
+                        3    -> "Severe"
+                        2    -> "Moderate"
+                        1    -> "Light"
+                        else -> "Clear"
+                    }
+                    // Yellow and gray have dark backgrounds in perception — use dark text for contrast
+                    val textOnBar = when (tier) {
+                        2    -> Color(0xFF1A1A1A)  // dark on yellow
+                        0    -> Color(0xFF3A3A3A)  // dark on gray
+                        else -> Color.White         // white on red / blue
+                    }
+                    val pctLabel = "${(probability * 100).toInt()}%"
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.weight(1f),
                     ) {
                         Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .height(barHeight.dp)
-                                .fillMaxWidth(0.6f)
+                                .height(MAX_BAR_HEIGHT_DP.dp)
+                                .fillMaxWidth(0.8f)
                                 .clip(RoundedCornerShape(2.dp))
                                 .background(barColor),
-                        )
+                        ) {
+                            Text(
+                                text = pctLabel,
+                                color = textOnBar,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = hourFormat.format(Date(timestamp)),
@@ -384,12 +410,19 @@ fun StormRiskTimelineCard(timeline: List<Pair<Long, Float>>) {
                             fontSize = 8.sp,
                             textAlign = TextAlign.Center,
                         )
+                        Text(
+                            text = tierLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = palette.mutedText,
+                            fontSize = 7.sp,
+                            textAlign = TextAlign.Center,
+                        )
                     }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Yellow bars indicate storm risk above threshold",
+                text = "Gray · Blue · Yellow · Red  —  Clear to Severe",
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.mutedText,
                 textAlign = TextAlign.Center,

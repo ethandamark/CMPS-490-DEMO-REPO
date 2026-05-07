@@ -71,21 +71,25 @@ CREATE TABLE model_instance (
     version VARCHAR(50),
     latitude DECIMAL(9,6),
     longitude DECIMAL(9,6),
-    result_level INT CHECK (result_level BETWEEN 0 AND 5),
-    result_type TEXT CHECK (result_type IN ('storm', 'clear')),
+    result_level INT CHECK (result_level BETWEEN 0 AND 3),
+    result_type TEXT CHECK (result_type IN ('clear', 'light', 'moderate', 'severe')),
     confidence_score DECIMAL(5,4),
+    predicted_dbz FLOAT,
     created_at TIMESTAMP
 );
 
--- ── Sentinel snapshot for storm simulations ────────────────────────
--- Model instances from simulations FK to this dummy row instead of
--- real weather snapshots.
+-- ── Sentinel snapshots for storm simulations ─────────────────────
+-- Each simulation tier gets a fixed UUID so model instances can FK
+-- to the correct sentinel instead of a real weather snapshot.
+-- clear=00…, light=10…, moderate=20…, storm/severe=30…
 INSERT INTO offline_weather_snapshot (
     weather_id, device_id, synced_at, is_current, weather_data, snapshot_type
-) VALUES (
-    '00000000-0000-0000-0000-000000000000',
-    NULL, NULL, FALSE, '[]'::jsonb, 'seed'
-) ON CONFLICT (weather_id) DO NOTHING;
+) VALUES
+    ('00000000-0000-0000-0000-000000000000', NULL, NULL, FALSE, '[]'::jsonb, 'seed'),
+    ('10000000-0000-0000-0000-000000000000', NULL, NULL, FALSE, '[]'::jsonb, 'seed'),
+    ('20000000-0000-0000-0000-000000000000', NULL, NULL, FALSE, '[]'::jsonb, 'seed'),
+    ('30000000-0000-0000-0000-000000000000', NULL, NULL, FALSE, '[]'::jsonb, 'seed')
+ON CONFLICT (weather_id) DO NOTHING;
 
 -- ── Role grants ────────────────────────────────────────────────────
 -- Supabase routes requests through anon / authenticated / service_role.
@@ -108,3 +112,26 @@ CREATE POLICY "Allow all" ON device                   FOR ALL USING (true) WITH 
 CREATE POLICY "Allow all" ON device_location          FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all" ON offline_weather_snapshot  FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all" ON model_instance           FOR ALL USING (true) WITH CHECK (true);
+
+-- ── Auto-deactivate stale accounts ────────────────────────────────
+-- Accounts with last_active_at older than 30 days are set to 'inactive'.
+CREATE OR REPLACE FUNCTION deactivate_stale_accounts()
+RETURNS void AS $$
+BEGIN
+    UPDATE anonymous_user
+    SET status = 'inactive'
+    WHERE last_active_at < NOW() - INTERVAL '30 days'
+      AND status = 'active';
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+        PERFORM cron.schedule(
+            'deactivate-stale-accounts',
+            '0 3 * * *',
+            'SELECT deactivate_stale_accounts()'
+        );
+    END IF;
+END $$;

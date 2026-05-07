@@ -113,6 +113,7 @@ class ModelInstanceSyncWorker(
                 addProperty("result_type", item.resultType)
                 addProperty("confidence_score", item.confidenceScore.toDouble())
                 addProperty("created_at", item.createdAt)
+                item.predictedDbz?.let { addProperty("predicted_dbz", it.toDouble()) }
                 item.weatherId?.let { addProperty("weather_id", it) }
             }
             instancesArray.add(obj)

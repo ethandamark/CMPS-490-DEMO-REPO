@@ -4,6 +4,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -91,7 +93,7 @@ class DebugPredictReceiver : BroadcastReceiver() {
                         nwpLiF36Min = null,
                         nwpLclF36Min = null,
                         nwpAvailableLeads = null,
-                        mrmsMaxDbz75km = null,
+                        mrmsMaxDbz75km = weatherData.optDouble("mrms_max_dbz_75km").takeUnless { it.isNaN() },
                     )
                     db.weatherCacheDao().upsert(cacheEntity)
                     Log.d(TAG, "✓ Weather cached (temp=${cacheEntity.temp}, hum=${cacheEntity.humidity}, press=${cacheEntity.pressure})")
@@ -112,7 +114,7 @@ class DebugPredictReceiver : BroadcastReceiver() {
                 Log.d(TAG, "🤖 Prediction: prob=${result.stormProbability}, alert=${result.alertState}, threshold=${result.threshold}")
                 Log.d(TAG, "══════════════════════════════════════════")
 
-                if (result.alertState == 1) {
+                if (result.alertState >= 2) {
                     fireStormNotification(context, result.stormProbability)
                 }
             } catch (e: Exception) {
@@ -174,7 +176,16 @@ class DebugPredictReceiver : BroadcastReceiver() {
                     }
                 }
             }
-            Log.d(TAG, "✓ Weather via direct Open-Meteo fallback")
+            // Attach NWP aggregates so the model gets the same features as via the backend proxy
+            val nwp = NwpFetcher.fetchAggregates(httpClient, latitude, longitude, current.optString("time"))
+            nwp.capeMax?.let  { current.put("nwp_cape_f3_6_max",  it) }
+            nwp.cinMax?.let   { current.put("nwp_cin_f3_6_max",   it) }
+            nwp.pwatMax?.let  { current.put("nwp_pwat_f3_6_max",  it) }
+            nwp.srh03Max?.let { current.put("nwp_srh03_f3_6_max", it) }
+            nwp.liMin?.let    { current.put("nwp_li_f3_6_min",    it) }
+            nwp.lclMin?.let   { current.put("nwp_lcl_f3_6_min",   it) }
+            current.put("nwp_available_leads", nwp.availableLeads)
+            Log.d(TAG, "\u2713 Weather via direct Open-Meteo fallback (NWP leads=${nwp.availableLeads})")
             current
         } catch (e: Exception) {
             Log.w(TAG, "Open-Meteo error: ${e.message}")
@@ -183,12 +194,20 @@ class DebugPredictReceiver : BroadcastReceiver() {
     }
 
     private fun fireStormNotification(context: Context, probability: Float) {
-        val channelId = "storm_alert_channel"
+        val channelId = "storm_alert_channel_v2"
         val nm = context.getSystemService(NotificationManager::class.java)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val channel = NotificationChannel(channelId, "Storm Alerts", NotificationManager.IMPORTANCE_HIGH)
-                .apply { description = "On-device storm probability alerts" }
+                .apply {
+                    description = "On-device storm probability alerts"
+                    setSound(soundUri, audioAttr)
+                }
             nm.createNotificationChannel(channel)
         }
 
@@ -198,13 +217,19 @@ class DebugPredictReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        val tier = OnDevicePredictor.probabilityToTier(probability)
+        val (notifTitle, notifText) = when (tier) {
+            3    -> "🚨 Severe Storm Warning" to "Severe conditions detected — ${(probability * 100).toInt()}% storm intensity"
+            else -> "⚠️ Storm Risk Detected" to "Moderate rain likely — ${(probability * 100).toInt()}% storm intensity"
+        }
         val notification = NotificationCompat.Builder(context, channelId)
-            .setContentTitle("⚠️ Storm Risk Detected")
-            .setContentText("On-device model: ${(probability * 100).toInt()}% storm probability")
+            .setContentTitle(notifTitle)
+            .setContentText(notifText)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND)
             .build()
 
         nm.notify(2001, notification)

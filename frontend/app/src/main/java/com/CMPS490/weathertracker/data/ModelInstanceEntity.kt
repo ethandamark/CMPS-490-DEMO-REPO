@@ -18,4 +18,5 @@ data class ModelInstanceEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "synced_at") val syncedAt: Long? = null,
     @ColumnInfo(name = "weather_id") val weatherId: String? = null,
+    @ColumnInfo(name = "predicted_dbz") val predictedDbz: Float? = null,
 )
